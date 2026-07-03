@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, use } from 'react'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
 import { ChevronLeft, Phone, Clock, ChevronDown, ChevronUp } from 'lucide-react'
@@ -23,21 +23,22 @@ const STATUS_COLOR: Record<OrderStatus, string> = {
   delivered: 'text-gray-600 bg-gray-50 border-gray-200',
 }
 
-export default function OrderPage({ params }: { params: { id: string } }) {
+export default function OrderPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params)
   const [order, setOrder] = useState<Order | null>(null)
   const [notFound, setNotFound] = useState(false)
   const [showItems, setShowItems] = useState(false)
 
   useEffect(() => {
     async function fetch_() {
-      const res = await fetch(`/api/orders/${params.id}`)
+      const res = await fetch(`/api/orders/${id}`)
       if (!res.ok) { setNotFound(true); return }
       setOrder(await res.json())
     }
     fetch_()
     const iv = setInterval(fetch_, 5000)
     return () => clearInterval(iv)
-  }, [params.id])
+  }, [id])
 
   if (notFound) return (
     <div className="min-h-screen flex flex-col items-center justify-center gap-4">

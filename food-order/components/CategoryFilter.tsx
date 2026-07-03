@@ -1,9 +1,18 @@
 'use client'
 
 import { motion } from 'framer-motion'
+import { LayoutGrid, TrendingUp, ChefHat, Fish, Sparkles, LucideIcon } from 'lucide-react'
 import { categories } from '@/lib/menu'
 import { Category } from '@/lib/types'
 import clsx from 'clsx'
+
+const CAT_ICONS: Record<string, LucideIcon> = {
+  all:        LayoutGrid,
+  bestseller: TrendingUp,
+  classic:    ChefHat,
+  seafood:    Fish,
+  fusion:     Sparkles,
+}
 
 interface Props {
   active: Category
@@ -31,7 +40,7 @@ export default function CategoryFilter({ active, onChange, counts }: Props) {
                     : 'bg-white text-gray-600 border border-gray-100 hover:border-orange-200 hover:text-orange-500'
                 )}
               >
-                <span className="text-base leading-none">{cat.emoji}</span>
+                {(() => { const Icon = CAT_ICONS[cat.key]; return Icon ? <Icon size={14} strokeWidth={2} /> : null })()}
                 <span>{cat.label}</span>
                 <span className={clsx(
                   'text-[10px] font-bold px-1.5 py-0.5 rounded-full leading-none',

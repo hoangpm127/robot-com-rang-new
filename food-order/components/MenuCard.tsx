@@ -1,16 +1,16 @@
 'use client'
 
 import { motion, AnimatePresence } from 'framer-motion'
-import { Star, Clock, Minus, Plus } from 'lucide-react'
+import { Star, Clock, Minus, Plus, Flame, Sparkles, TrendingUp } from 'lucide-react'
 import { MenuItem } from '@/lib/types'
 import { useCart } from '@/context/CartContext'
 import FoodImage from '@/components/FoodImage'
 import clsx from 'clsx'
 
 const TAG = {
-  hot:        { label: '🔥 Hot',      cls: 'bg-red-500 text-white' },
-  new:        { label: '✨ Mới',      cls: 'bg-violet-500 text-white' },
-  bestseller: { label: '⭐ Bán chạy', cls: 'bg-orange-500 text-white' },
+  hot:        { label: 'Hot',      Icon: Flame,      cls: 'bg-red-500 text-white' },
+  new:        { label: 'Mới',      Icon: Sparkles,   cls: 'bg-violet-500 text-white' },
+  bestseller: { label: 'Bán chạy', Icon: TrendingUp, cls: 'bg-orange-500 text-white' },
 }
 
 export default function MenuCard({ item, index = 0 }: { item: MenuItem; index?: number }) {
@@ -39,11 +39,15 @@ export default function MenuCard({ item, index = 0 }: { item: MenuItem; index?: 
         <div className="absolute inset-0 bg-gradient-to-t from-black/25 via-transparent to-transparent pointer-events-none" />
 
         {/* Tag */}
-        {item.tag && (
-          <span className={clsx('absolute top-2 left-2 text-[11px] font-bold px-2 py-1 rounded-lg', TAG[item.tag].cls)}>
-            {TAG[item.tag].label}
-          </span>
-        )}
+        {item.tag && (() => {
+          const t = TAG[item.tag!]
+          return (
+            <span className={clsx('absolute top-2 left-2 text-[11px] font-bold px-2 py-1 rounded-lg flex items-center gap-1', t.cls)}>
+              <t.Icon size={10} strokeWidth={2.5} />
+              {t.label}
+            </span>
+          )
+        })()}
 
         {/* Sold count */}
         <span className="absolute bottom-2 right-2 bg-black/45 backdrop-blur-sm text-white text-[10px] font-medium px-2 py-1 rounded-lg">

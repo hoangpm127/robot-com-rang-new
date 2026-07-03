@@ -1,4 +1,4 @@
-import { Star, Clock, Bike, MapPin, ChevronRight } from 'lucide-react'
+import { Star, Clock, Bike, MapPin, ChevronRight, Gift } from 'lucide-react'
 
 export default function Hero() {
   return (
@@ -55,7 +55,7 @@ export default function Hero() {
         {/* Promo card */}
         <div className="mt-4 bg-white/15 backdrop-blur-sm border border-white/30 rounded-2xl p-3 flex items-center justify-between cursor-pointer hover:bg-white/25 transition-colors">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 bg-yellow-400 rounded-xl flex items-center justify-center text-lg">🎁</div>
+            <div className="w-9 h-9 bg-yellow-400 rounded-xl flex items-center justify-center text-white"><Gift size={18} strokeWidth={2} /></div>
             <div>
               <p className="text-white font-bold text-sm">Giảm 15% đơn đầu tiên</p>
               <p className="text-orange-100 text-xs">Áp dụng cho tất cả món — Hôm nay thôi!</p>

@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary: #f97316;
+  --primary-dark: #ea580c;
+  --bg: #f8f7f4;
+  --surface: #ffffff;
+  --border: #ede8e3;
+  --text: #1a1a1a;
+  --muted: #9a9a9a;
+}
+
+* { -webkit-tap-highlight-color: transparent; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-inter), -apple-system, sans-serif;
+}
+
+.hide-scrollbar::-webkit-scrollbar { display: none; }
+.hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+.hero-pattern {
+  background-image: radial-gradient(circle at 20% 50%, white 1px, transparent 1px),
+                    radial-gradient(circle at 80% 20%, white 1px, transparent 1px);
+  background-size: 60px 60px;
+}
+
+/* Safe area for phones with home indicator */
+.pb-safe { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+.bottom-safe { bottom: max(1rem, env(safe-area-inset-bottom)); }
+

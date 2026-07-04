@@ -19,8 +19,14 @@ export default function Navbar({ onCartOpen, search, onSearch }: NavbarProps) {
         {/* Top bar */}
         <div className="h-14 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 shrink-0">
-            <div className="w-8 h-8 bg-orange-500 rounded-xl flex items-center justify-center text-white text-lg font-bold shadow-sm">
-              🍳
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center shadow-md shadow-orange-200 bg-gradient-to-br from-orange-500 via-orange-400 to-amber-400">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 11h16" />
+                <path d="M5.5 11c0 3.6 2.9 6.5 6.5 6.5s6.5-2.9 6.5-6.5" />
+                <path d="M9 9c0-1.2 1.2-1.8 1.2-3" />
+                <path d="M12 9c0-1.2 1.2-1.8 1.2-3" />
+                <path d="M15 9c0-1.2 1.2-1.8 1.2-3" />
+              </svg>
             </div>
             <div>
               <p className="font-extrabold text-gray-900 text-sm leading-none">Cơm Rang 247</p>

@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronLeft, User, Phone, Hash, MessageSquare, CheckCircle2 } from 'lucide-react'
 import { useCart } from '@/context/CartContext'
+import { PORTIONS } from '@/lib/types'
 import clsx from 'clsx'
 
 type Step = 'info' | 'review' | 'done'
@@ -114,12 +115,19 @@ export default function CheckoutPage() {
               <div className="bg-white rounded-2xl p-4 border border-gray-100">
                 <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Đơn hàng ({items.length} món)</p>
                 <div className="space-y-1.5">
-                  {items.map(ci => (
-                    <div key={ci.item.id} className="flex justify-between text-sm">
-                      <span className="text-gray-700 truncate mr-2">{ci.item.name} <span className="text-gray-400">×{ci.quantity}</span></span>
-                      <span className="font-semibold shrink-0">{(ci.item.price * ci.quantity).toLocaleString('vi-VN')}đ</span>
-                    </div>
-                  ))}
+                  {items.map(ci => {
+                    const linePrice = (ci.item.price + PORTIONS[ci.portion].extra) * ci.quantity
+                    return (
+                      <div key={ci.cartKey} className="flex justify-between text-sm">
+                        <span className="text-gray-700 truncate mr-2">
+                          {ci.item.name}
+                          <span className="text-orange-400 text-[10px] ml-1">({PORTIONS[ci.portion].label})</span>
+                          <span className="text-gray-400"> ×{ci.quantity}</span>
+                        </span>
+                        <span className="font-semibold shrink-0">{linePrice.toLocaleString('vi-VN')}đ</span>
+                      </div>
+                    )
+                  })}
                 </div>
                 <div className="border-t border-gray-100 mt-3 pt-3 flex justify-between font-bold">
                   <span>Tổng</span>
@@ -174,11 +182,13 @@ export default function CheckoutPage() {
               <div className="bg-white rounded-2xl p-4 border border-gray-100 space-y-3">
                 <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Ghi chú theo món</p>
                 {items.map(ci => (
-                  <div key={ci.item.id}>
-                    <label className="text-xs text-gray-500 mb-1 block font-medium">{ci.item.name}</label>
+                  <div key={ci.cartKey}>
+                    <label className="text-xs text-gray-500 mb-1 block font-medium">
+                      {ci.item.name} <span className="text-orange-400">({PORTIONS[ci.portion].label})</span>
+                    </label>
                     <input
                       value={ci.note}
-                      onChange={e => setNote(ci.item.id, e.target.value)}
+                      onChange={e => setNote(ci.cartKey, e.target.value)}
                       placeholder="Ít cay, không hành, thêm trứng..."
                       className="w-full px-3 py-2.5 bg-gray-50 border border-gray-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-orange-200"
                     />
@@ -213,15 +223,22 @@ export default function CheckoutPage() {
               <div className="bg-white rounded-2xl p-4 border border-gray-100">
                 <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Chi tiết món</p>
                 <div className="space-y-2">
-                  {items.map(ci => (
-                    <div key={ci.item.id} className="text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-gray-700">{ci.item.name} <span className="text-gray-400">×{ci.quantity}</span></span>
-                        <span className="font-bold">{(ci.item.price * ci.quantity).toLocaleString('vi-VN')}đ</span>
+                  {items.map(ci => {
+                    const linePrice = (ci.item.price + PORTIONS[ci.portion].extra) * ci.quantity
+                    return (
+                      <div key={ci.cartKey} className="text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-gray-700">
+                            {ci.item.name}
+                            <span className="text-orange-400 text-[10px] ml-1">({PORTIONS[ci.portion].label})</span>
+                            <span className="text-gray-400"> ×{ci.quantity}</span>
+                          </span>
+                          <span className="font-bold">{linePrice.toLocaleString('vi-VN')}đ</span>
+                        </div>
+                        {ci.note && <p className="text-xs text-gray-400 mt-0.5">↳ {ci.note}</p>}
                       </div>
-                      {ci.note && <p className="text-xs text-gray-400 mt-0.5">↳ {ci.note}</p>}
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
                 <div className="border-t border-gray-100 mt-3 pt-3 space-y-1.5 text-sm">
                   <div className="flex justify-between text-gray-400">

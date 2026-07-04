@@ -1,8 +1,10 @@
-// Edge Runtime: V8 isolate reused aggressively — global Map persists across requests
 export const runtime = 'edge'
 export const dynamic = 'force-dynamic'
 
-const confirmed = new Map<string, number>() // orderId → timestamp
+const COOK_MS = 60_000
+
+const confirmed = new Map<string, number>() // orderId → confirmedAt timestamp
+let robotFreeAt = 0                          // when all queued orders finish
 
 export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -12,6 +14,11 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
 
 export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  confirmed.set(id, Date.now())
-  return Response.json({ ok: true })
+  const now = Date.now()
+  // Queue this order after whatever is already cooking
+  const startAt = Math.max(now, robotFreeAt)
+  robotFreeAt = startAt + COOK_MS
+  const waitMs = startAt - now // 0 if robot is free now, >0 if there's a queue
+  confirmed.set(id, now)
+  return Response.json({ ok: true, waitMs })
 }

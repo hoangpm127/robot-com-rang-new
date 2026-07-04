@@ -16,6 +16,7 @@ export default function CheckoutPage() {
   const [pageState, setPageState] = useState<PageState>('creating')
   const [orderId, setOrderId] = useState('')
   const [payUrl, setPayUrl] = useState('')
+  const [redirectCount, setRedirectCount] = useState(3)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const createdRef = useRef(false)
 
@@ -64,6 +65,23 @@ export default function CheckoutPage() {
     }, 2000)
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [pageState, orderId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 3s countdown after success → redirect to homepage for next customer
+  useEffect(() => {
+    if (pageState !== 'success') return
+    setRedirectCount(3)
+    const t = setInterval(() => {
+      setRedirectCount(prev => {
+        if (prev <= 1) {
+          clearInterval(t)
+          router.push('/')
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+    return () => clearInterval(t)
+  }, [pageState]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const qrSrc = payUrl
     ? `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(payUrl)}&bgcolor=ffffff&color=111827&margin=12`
@@ -196,7 +214,7 @@ export default function CheckoutPage() {
             </motion.div>
             <div>
               <h2 className="text-2xl font-extrabold text-gray-900">Thanh toán thành công!</h2>
-              <p className="text-gray-400 text-sm mt-1">Nhà bếp đã nhận đơn của bạn 🍱</p>
+              <p className="text-gray-400 text-sm mt-1">Nhà bếp đã nhận đơn — cơm đang được rang!</p>
             </div>
             <div className="bg-orange-50 border border-orange-200 rounded-2xl px-6 py-4 w-full">
               <p className="text-xs text-gray-400 mb-1">Mã đơn hàng</p>
@@ -204,16 +222,22 @@ export default function CheckoutPage() {
                 #{orderId.toUpperCase()}
               </p>
             </div>
-            <div className="flex gap-3 w-full">
-              <button type="button" onClick={() => router.push(`/order/${orderId}`)}
-                className="flex-1 bg-orange-500 hover:bg-orange-600 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-orange-200">
-                Theo dõi đơn →
-              </button>
-              <Link href="/"
-                className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-4 rounded-2xl transition-all text-center flex items-center justify-center">
-                Trang chủ
-              </Link>
+            {/* Auto-redirect countdown */}
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span>Tự động về trang chủ sau</span>
+              <AnimatePresence mode="wait">
+                <motion.span key={redirectCount}
+                  initial={{ scale: 1.4, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.6, opacity: 0 }}
+                  className="inline-flex w-7 h-7 rounded-full bg-orange-100 text-orange-600 font-extrabold text-sm items-center justify-center">
+                  {redirectCount}
+                </motion.span>
+              </AnimatePresence>
+              <span>giây...</span>
             </div>
+            <Link href="/"
+              className="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-3 rounded-2xl transition-all text-center text-sm">
+              Về trang chủ ngay
+            </Link>
           </motion.div>
         )}
 

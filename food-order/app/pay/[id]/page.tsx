@@ -2,10 +2,10 @@
 
 import { useState, use, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle2, Shield, Fingerprint, ChevronLeft, BellRing } from 'lucide-react'
+import { CheckCircle2, Shield, Fingerprint, ChevronLeft, BellRing, Clock } from 'lucide-react'
 import { useSearchParams } from 'next/navigation'
 
-type PageState = 'confirm' | 'processing' | 'success' | 'cooking' | 'ready'
+type PageState = 'confirm' | 'processing' | 'success' | 'queued' | 'cooking' | 'ready'
 
 const COOK_SECONDS = 60
 
@@ -13,19 +13,54 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
   const { id } = use(params)
   const searchParams = useSearchParams()
   const [state, setState] = useState<PageState>('confirm')
-  const [countdown, setCountdown] = useState(3)   // 3-2-1 before cooking
+  const [countdown, setCountdown] = useState(3)       // 3s after payment success
+  const [queueLeft, setQueueLeft] = useState(0)        // wait for robot to be free
   const [cookLeft, setCookLeft] = useState(COOK_SECONDS)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const queueSecsRef = useRef(0)                       // avoid stale closure in effect
 
   const total = Number(searchParams.get('t') ?? 0)
   const portionCount = Number(searchParams.get('n') ?? 1)
 
-  // 3-second countdown after payment success, then switch to cooking
+  const handleConfirm = async () => {
+    setState('processing')
+    await new Promise(r => setTimeout(r, 1800))
+    const res = await fetch(`/api/payment/${id}`, { method: 'POST' })
+    const data = await res.json()
+    // waitMs: how long until robot is free (0 = free now)
+    // subtract ~3s because we show success screen first before cooking starts
+    const rawSecs = Math.round((data.waitMs ?? 0) / 1000)
+    queueSecsRef.current = Math.max(0, rawSecs - 3)
+    setState('success')
+  }
+
+  // 3s countdown on success screen → queued or cooking
   useEffect(() => {
     if (state !== 'success') return
     setCountdown(3)
     timerRef.current = setInterval(() => {
       setCountdown(prev => {
+        if (prev <= 1) {
+          clearInterval(timerRef.current!)
+          if (queueSecsRef.current > 0) {
+            setQueueLeft(queueSecsRef.current)
+            setState('queued')
+          } else {
+            setState('cooking')
+          }
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+    return () => { if (timerRef.current) clearInterval(timerRef.current) }
+  }, [state])
+
+  // Queue wait countdown → cooking
+  useEffect(() => {
+    if (state !== 'queued') return
+    timerRef.current = setInterval(() => {
+      setQueueLeft(prev => {
         if (prev <= 1) {
           clearInterval(timerRef.current!)
           setState('cooking')
@@ -37,7 +72,7 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [state])
 
-  // 60-second cooking progress bar
+  // 60s cooking countdown → ready
   useEffect(() => {
     if (state !== 'cooking') return
     setCookLeft(COOK_SECONDS)
@@ -54,16 +89,8 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [state])
 
-  const handleConfirm = async () => {
-    setState('processing')
-    await new Promise(r => setTimeout(r, 1800))
-    await fetch(`/api/payment/${id}`, { method: 'POST' })
-    setState('success')
-  }
-
-  const cookProgress = cookLeft / COOK_SECONDS // 1 → 0
-  const mins = Math.floor(cookLeft / 60)
-  const secs = cookLeft % 60
+  const cookProgress = cookLeft / COOK_SECONDS
+  const fmtSecs = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 
   return (
     <div className="min-h-screen flex flex-col bg-[linear-gradient(160deg,#1a237e_0%,#0d47a1_40%,#1565c0_100%)]">
@@ -147,7 +174,7 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
             </motion.div>
           )}
 
-          {/* ── Payment Success (3s countdown) ── */}
+          {/* ── Payment Success (3s) ── */}
           {state === 'success' && (
             <motion.div key="success" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               className="flex-1 flex flex-col items-center justify-center px-6 pb-8 gap-5 text-center">
@@ -180,7 +207,6 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
                 </div>
               </motion.div>
 
-              {/* 3-second countdown chip */}
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }}
                 className="flex items-center gap-2 text-sm text-gray-400">
                 <span>Chuyển sang theo dõi đơn sau</span>
@@ -196,12 +222,55 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
             </motion.div>
           )}
 
-          {/* ── Cooking progress ── */}
+          {/* ── Queued: waiting for robot ── */}
+          {state === 'queued' && (
+            <motion.div key="queued" initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+              className="flex-1 flex flex-col items-center justify-center px-6 pb-10 gap-6 text-center">
+
+              <div className="relative">
+                <div className="w-28 h-28 rounded-full bg-blue-50 border-2 border-blue-200 flex items-center justify-center shadow-lg shadow-blue-100">
+                  <Clock size={52} strokeWidth={1.4} className="text-blue-400" />
+                </div>
+                {/* Orbiting dot */}
+                <motion.div className="absolute w-4 h-4 rounded-full bg-blue-400 top-0 right-2 shadow-md"
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 2.5, repeat: Infinity, ease: 'linear' }}
+                  style={{ transformOrigin: '-42px 52px' }}
+                />
+              </div>
+
+              <div>
+                <h2 className="text-2xl font-extrabold text-gray-900">Đơn bạn đã vào hàng</h2>
+                <p className="text-gray-400 text-sm mt-1">Robot đang nấu cho khách trước, chờ tí nhé!</p>
+              </div>
+
+              <div className="text-5xl font-black tabular-nums text-blue-500">
+                {fmtSecs(queueLeft)}
+              </div>
+
+              <div className="w-full space-y-2">
+                <div className="h-3 bg-blue-100 rounded-full overflow-hidden">
+                  <motion.div className="h-full rounded-full bg-gradient-to-r from-blue-400 to-indigo-400"
+                    initial={{ width: '100%' }}
+                    animate={{ width: `${(queueLeft / queueSecsRef.current) * 100}%` }}
+                    transition={{ duration: 0.9, ease: 'linear' }}
+                  />
+                </div>
+                <p className="text-xs text-gray-400">Còn khoảng {queueLeft} giây đến lượt bạn</p>
+              </div>
+
+              <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 rounded-full text-blue-500 text-sm font-semibold">
+                <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
+                Robot đang bận — sắp đến lượt bạn
+              </div>
+            </motion.div>
+          )}
+
+          {/* ── Cooking ── */}
           {state === 'cooking' && (
             <motion.div key="cooking" initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
               className="flex-1 flex flex-col items-center justify-center px-6 pb-10 gap-6 text-center">
 
-              {/* Animated bowl icon */}
               <div className="relative">
                 <div className="w-28 h-28 rounded-full bg-gradient-to-br from-orange-100 to-amber-50 border-2 border-orange-200 flex items-center justify-center shadow-lg shadow-orange-100">
                   <svg viewBox="0 0 24 24" width="52" height="52" fill="none" stroke="#f97316" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -212,7 +281,6 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
                     <path d="M15 9c0-1.2 1.2-1.8 1.2-3" />
                   </svg>
                 </div>
-                {/* Steam dots */}
                 {[0, 1, 2].map(i => (
                   <motion.div key={i}
                     className="absolute w-2 h-2 rounded-full bg-orange-300/60"
@@ -228,16 +296,13 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
                 <p className="text-gray-400 text-sm mt-1">Vui lòng chờ trong giây lát nhé!</p>
               </div>
 
-              {/* Timer */}
               <div className="text-5xl font-black tabular-nums text-orange-500">
-                {mins > 0 ? `${mins}:${String(secs).padStart(2, '0')}` : `0:${String(secs).padStart(2, '0')}`}
+                {fmtSecs(cookLeft)}
               </div>
 
-              {/* Progress bar */}
               <div className="w-full space-y-2">
                 <div className="h-3 bg-orange-100 rounded-full overflow-hidden">
-                  <motion.div
-                    className="h-full rounded-full bg-gradient-to-r from-orange-400 to-amber-400"
+                  <motion.div className="h-full rounded-full bg-gradient-to-r from-orange-400 to-amber-400"
                     initial={{ width: '100%' }}
                     animate={{ width: `${cookProgress * 100}%` }}
                     transition={{ duration: 0.9, ease: 'linear' }}
@@ -246,9 +311,7 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
                 <p className="text-xs text-gray-400">Còn khoảng {cookLeft} giây nữa</p>
               </div>
 
-              <div className="flex flex-col gap-1.5 text-xs text-gray-300">
-                <p>Cơm rang tươi, nấu tại chỗ — không chờ lâu đâu!</p>
-              </div>
+              <p className="text-xs text-gray-300">Cơm rang tươi, nấu tại chỗ — không chờ lâu đâu!</p>
             </motion.div>
           )}
 
@@ -265,9 +328,7 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
               </motion.div>
 
               <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
-                <h2 className="text-3xl font-black text-gray-900 leading-tight">
-                  Cơm đã sẵn sàng!
-                </h2>
+                <h2 className="text-3xl font-black text-gray-900 leading-tight">Cơm đã sẵn sàng!</h2>
                 <p className="text-orange-500 font-bold text-lg mt-2">
                   Xin mời quý khách ra quầy lấy đồ nhé
                 </p>
@@ -281,7 +342,6 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
                 <p className="text-xs text-gray-400">Vui lòng xuất trình mã này khi lấy đồ</p>
               </motion.div>
 
-              {/* Pulsing indicator */}
               <motion.div animate={{ scale: [1, 1.06, 1] }} transition={{ duration: 2, repeat: Infinity }}
                 className="flex items-center gap-2 px-4 py-2 bg-green-100 rounded-full text-green-600 text-sm font-semibold">
                 <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />

@@ -38,8 +38,10 @@ export default function CheckoutPage() {
       .then(r => r.json())
       .then(order => {
         if (order.id) {
+          const portionCount = items.reduce((s, i) => s + i.quantity, 0)
           setOrderId(order.id)
-          setPayUrl(`${window.location.origin}/pay/${order.id}`)
+          // Encode total+count in URL so phone doesn't need to fetch order from server
+          setPayUrl(`${window.location.origin}/pay/${order.id}?t=${order.total}&n=${portionCount}`)
           setPageState('waiting')
         }
       })
@@ -50,9 +52,9 @@ export default function CheckoutPage() {
     if (pageState !== 'waiting' || !orderId) return
     pollRef.current = setInterval(async () => {
       try {
-        const r = await fetch(`/api/orders/${orderId}`)
+        const r = await fetch(`/api/payment/${orderId}`)
         const o = await r.json()
-        if (o.status === 'confirmed') {
+        if (o.confirmed) {
           clearInterval(pollRef.current!)
           pollRef.current = null
           clear()

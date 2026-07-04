@@ -1,45 +1,35 @@
 'use client'
 
-import { useEffect, useState, use } from 'react'
+import { useState, use } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CheckCircle2, Shield, Fingerprint, ChevronLeft } from 'lucide-react'
-import { PORTIONS } from '@/lib/types'
-import type { Order } from '@/lib/types'
+import { useSearchParams } from 'next/navigation'
 
-type PageState = 'loading' | 'confirm' | 'processing' | 'success' | 'error'
+type PageState = 'confirm' | 'processing' | 'success'
 
 export default function PayPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
-  const [state, setState] = useState<PageState>('loading')
-  const [order, setOrder] = useState<Order | null>(null)
+  const searchParams = useSearchParams()
+  const [state, setState] = useState<PageState>('confirm')
 
-  useEffect(() => {
-    fetch(`/api/orders/${id}`)
-      .then(r => { if (!r.ok) throw new Error(); return r.json() })
-      .then(o => { setOrder(o); setState(o.status === 'confirmed' ? 'success' : 'confirm') })
-      .catch(() => setState('error'))
-  }, [id])
+  // Read order data from URL params — no server fetch needed across instances
+  const total = Number(searchParams.get('t') ?? 0)
+  const portionCount = Number(searchParams.get('n') ?? 1)
 
   const handleConfirm = async () => {
     setState('processing')
-    // Simulate biometric/processing delay
-    await new Promise(r => setTimeout(r, 1800))
-    await fetch(`/api/orders/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'confirmed' }),
-    })
+    await new Promise(r => setTimeout(r, 1800)) // simulate biometric delay
+    // POST to edge runtime endpoint — V8 isolate shared with checkout polling
+    await fetch(`/api/payment/${id}`, { method: 'POST' })
     setState('success')
   }
 
-  const total = order?.total ?? 0
-
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: 'linear-gradient(160deg, #1a237e 0%, #0d47a1 40%, #1565c0 100%)' }}>
+    <div className="min-h-screen flex flex-col bg-[linear-gradient(160deg,#1a237e_0%,#0d47a1_40%,#1565c0_100%)]">
 
       {/* Bank header */}
       <div className="flex items-center justify-between px-5 pt-12 pb-5">
-        <button type="button" className="text-white/60 hover:text-white transition-colors">
+        <button type="button" aria-label="Quay lại" className="text-white/60 hover:text-white transition-colors">
           <ChevronLeft size={22} />
         </button>
         <div className="text-center">
@@ -52,35 +42,16 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
         </div>
       </div>
 
-      {/* Main card */}
+      {/* White card */}
       <div className="flex-1 bg-white rounded-t-[32px] flex flex-col overflow-hidden">
-
         <AnimatePresence mode="wait">
 
-          {/* Loading */}
-          {state === 'loading' && (
-            <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-              className="flex-1 flex items-center justify-center">
-              <div className="w-10 h-10 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-            </motion.div>
-          )}
-
-          {/* Error */}
-          {state === 'error' && (
-            <motion.div key="error" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-              className="flex-1 flex flex-col items-center justify-center gap-3 p-8 text-center">
-              <p className="text-4xl">❌</p>
-              <p className="font-bold text-gray-800">Không tìm thấy đơn hàng</p>
-              <p className="text-gray-400 text-sm">Mã đơn #{id.toUpperCase()} không tồn tại</p>
-            </motion.div>
-          )}
-
-          {/* Confirm screen */}
-          {(state === 'confirm' || state === 'processing') && order && (
+          {/* Confirm / Processing */}
+          {(state === 'confirm' || state === 'processing') && (
             <motion.div key="confirm" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
-              className="flex-1 flex flex-col px-5 pt-6 pb-8 gap-5">
+              className="flex-1 flex flex-col px-5 pt-7 pb-8 gap-5">
 
-              {/* Merchant info */}
+              {/* Merchant */}
               <div className="flex items-center gap-3.5 pb-5 border-b border-gray-100">
                 <div className="w-14 h-14 rounded-2xl shadow-md bg-gradient-to-br from-orange-500 to-amber-400 flex items-center justify-center shrink-0">
                   <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -89,9 +60,11 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
                   </svg>
                 </div>
                 <div>
-                  <p className="font-extrabold text-gray-900 text-base leading-tight">Cơm Rang 247</p>
-                  <p className="text-xs text-gray-400 mt-0.5">Mã giao dịch: #{id.toUpperCase()}</p>
-                  <p className="text-xs text-gray-400">{new Date().toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' })}</p>
+                  <p className="font-extrabold text-gray-900 text-base">Cơm Rang 247</p>
+                  <p className="text-xs text-gray-400 mt-0.5">Mã GD: #{id.toUpperCase()}</p>
+                  <p className="text-xs text-gray-400">
+                    {new Date().toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' })}
+                  </p>
                 </div>
               </div>
 
@@ -102,28 +75,10 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
                   {total.toLocaleString('vi-VN')}
                   <span className="text-2xl text-gray-400 font-semibold ml-1">đ</span>
                 </p>
+                <p className="text-xs text-gray-400 mt-2">{portionCount} suất cơm rang</p>
               </div>
 
-              {/* Items */}
-              <div className="bg-gray-50 rounded-2xl p-4 space-y-2">
-                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Chi tiết đơn hàng</p>
-                {order.items.map((ci: any, idx: number) => {
-                  const portion = (ci.portion ?? 'regular') as keyof typeof PORTIONS
-                  const portionInfo = PORTIONS[portion]
-                  const linePrice = (ci.item.price + portionInfo.extra) * ci.quantity
-                  return (
-                    <div key={ci.cartKey ?? `${ci.item.id}-${idx}`} className="flex justify-between text-sm">
-                      <span className="text-gray-700 leading-tight">
-                        {ci.item.name}
-                        <span className="block text-[10px] text-orange-400">{portionInfo.label} × {ci.quantity}</span>
-                      </span>
-                      <span className="font-bold text-gray-800 shrink-0 ml-2">{linePrice.toLocaleString('vi-VN')}đ</span>
-                    </div>
-                  )
-                })}
-              </div>
-
-              {/* Source account (fake) */}
+              {/* Account */}
               <div className="flex items-center justify-between px-4 py-3 bg-gray-50 rounded-xl text-sm">
                 <span className="text-gray-400">Tài khoản nguồn</span>
                 <span className="font-semibold text-gray-700">**** **** 1247</span>
@@ -131,24 +86,20 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
 
               <div className="flex-1" />
 
-              {/* Confirm / Processing button */}
+              {/* CTA */}
               <AnimatePresence mode="wait">
                 {state === 'confirm' && (
                   <motion.div key="btn" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                     <p className="text-center text-xs text-gray-400 mb-3">Xác nhận bằng vân tay hoặc khuôn mặt</p>
-                    <button
-                      type="button"
-                      onClick={handleConfirm}
-                      className="w-full py-4 rounded-2xl font-extrabold text-white text-base transition-all active:scale-[0.98] flex items-center justify-center gap-2.5 shadow-xl"
-                      style={{ background: 'linear-gradient(135deg, #1a237e, #1565c0)' }}
-                    >
+                    <button type="button" onClick={handleConfirm}
+                      className="w-full py-4 rounded-2xl font-extrabold text-white text-base transition-all active:scale-[0.98] flex items-center justify-center gap-2.5 shadow-xl bg-[linear-gradient(135deg,#1a237e,#1565c0)]">
                       <Fingerprint size={22} strokeWidth={1.8} />
                       XÁC NHẬN THANH TOÁN
                     </button>
                   </motion.div>
                 )}
                 {state === 'processing' && (
-                  <motion.div key="processing" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                  <motion.div key="proc" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
                     className="flex flex-col items-center gap-3 py-2">
                     <div className="w-12 h-12 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
                     <p className="text-gray-500 font-semibold">Đang xử lý giao dịch...</p>
@@ -159,16 +110,14 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
             </motion.div>
           )}
 
-          {/* Success screen */}
+          {/* Success */}
           {state === 'success' && (
             <motion.div key="success" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
               className="flex-1 flex flex-col items-center justify-center px-6 pb-8 gap-5 text-center">
 
-              <motion.div
-                initial={{ scale: 0 }} animate={{ scale: 1 }}
-                transition={{ type: 'spring', damping: 10, delay: 0.1 }}
-              >
-                <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center mb-2">
+              <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }}
+                transition={{ type: 'spring', damping: 10, delay: 0.1 }}>
+                <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center">
                   <CheckCircle2 size={52} className="text-green-500" />
                 </div>
               </motion.div>

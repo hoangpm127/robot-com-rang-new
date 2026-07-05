@@ -361,9 +361,23 @@ void setup() {
   scale.tare();
   Serial.println("Tare OK");
 
+  WiFi.mode(WIFI_STA);        // chi station, khong giu AP mode cu tu flash
+  WiFi.persistent(true);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("WiFi");
-  while (WiFi.status() != WL_CONNECTED) { delay(400); Serial.print("."); }
+  unsigned long wifiAttemptStart = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(400);
+    Serial.print(".");
+    // Neu sau 15s van chua noi (vd router chua kip boot xong khi mat dien),
+    // thu goi lai begin() thay vi treo vinh vien cho mot lan thu duy nhat
+    if (millis() - wifiAttemptStart > 15000) {
+      Serial.println(" retry WiFi.begin()");
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      wifiAttemptStart = millis();
+    }
+  }
   Serial.print("\n>> http://");
   Serial.println(WiFi.localIP());
   Serial.print(">> Push to: https://");
@@ -379,6 +393,19 @@ void setup() {
 }
 
 void loop() {
+  // Chay doc lap, khong ai theo doi Serial — phai tu phuc hoi khi mat WiFi
+  // thay vi treo im lang cho den khi co nguoi cam lai USB.
+  if (WiFi.status() != WL_CONNECTED) {
+    static unsigned long lastReconnectMs = 0;
+    unsigned long now2 = millis();
+    if (now2 - lastReconnectMs > 10000) {
+      lastReconnectMs = now2;
+      Serial.println("WiFi mat ket noi, dang thu lai...");
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+    }
+    return; // bo qua push/server cho den khi co WiFi lai
+  }
+
   server.handleClient();
 
   if (scale.is_ready()) {

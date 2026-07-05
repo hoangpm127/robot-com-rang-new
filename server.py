@@ -1,7 +1,10 @@
 """
 Dobot CR7 Remote Control Server + Dosing Controller
 Run: py server.py
-Access via ngrok URL
+
+Weight comes from ESP8266 -> Vercel (/api/scale) -> polled here, no LAN/ngrok
+needed for that part. ngrok is only needed so the deployed website can reach
+this PC to trigger /api/dispense, /api/run, /api/cook_order etc.
 """
 import threading, time, socket, re, random
 import requests as req
@@ -11,8 +14,11 @@ from flask import Flask, jsonify, request, render_template_string
 ROBOT_IP   = "192.168.5.1"
 SERVER_PORT = 5000
 
-# ── ESP8266 load cell ────────────────────────────────────────
-ESP8266_URL = "http://192.168.100.180"
+# ── Load cell (via deployed web server) ───────────────────────
+# ESP8266 pushes weight straight to this Vercel endpoint over HTTPS;
+# we poll the same endpoint here instead of hitting the ESP over LAN.
+# No ngrok needed for this path — ESP and this PC just need Internet.
+VERCEL_SCALE_URL = "https://robot-com-rang-new.vercel.app/api/scale"
 
 # ── Dosing pump config ───────────────────────────────────────
 PUMP_DO_PORT      = 3      # Robot DO port wired to dosing pump (change as needed)
@@ -23,7 +29,7 @@ MAX_CORRECTIONS   = 8      # Max correction bursts before giving up
 VALID_TARGETS     = {100, 200, 300}
 
 # Set True until real robot is connected → weight/pump are simulated
-SIMULATE_ROBOT = True
+SIMULATE_ROBOT = False
 
 # Joint angles from point.json
 JOINTS = {
@@ -272,7 +278,8 @@ def run_program():
 # ─────────────────────────────────────────────────────────────
 
 def _weight_poll_loop():
-    """Background thread: keeps _weight_cache fresh at ~3 Hz."""
+    """Background thread: keeps _weight_cache fresh at ~3 Hz by polling
+    the Vercel /api/scale endpoint that the ESP8266 pushes weight into."""
     global _sim_weight
     while True:
         try:
@@ -282,7 +289,7 @@ def _weight_poll_loop():
                 _weight_cache["weight"] = max(0.0, w)
                 _weight_cache["stable"] = True
             else:
-                r = req.get(f"{ESP8266_URL}/data", timeout=2)
+                r = req.get(VERCEL_SCALE_URL, timeout=3)
                 d = r.json()
                 _weight_cache["weight"] = float(d["weight"])
                 _weight_cache["stable"] = bool(d.get("stable", False))
@@ -654,6 +661,98 @@ def api_dispense_status():
         return jsonify(dict(dispense_state))
 
 
+# ── Cook order (called by Vercel when payment confirmed) ───────
+
+# Queue của các order cần nấu: list of dict {order_id, items, total}
+_cook_queue: list[dict] = []
+_cook_lock = threading.Lock()
+_cook_status: dict = {"running": False, "current_order": None, "queue_len": 0, "log": []}
+
+def _cook_log(msg):
+    ts = time.strftime('%H:%M:%S')
+    entry = f"[{ts}] {msg}"
+    _cook_status["log"].insert(0, entry)
+    _cook_status["log"] = _cook_status["log"][:30]
+    log(msg)
+
+def _cook_loop():
+    """Worker thread: dequeues and cooks orders one by one."""
+    while True:
+        with _cook_lock:
+            if not _cook_queue:
+                _cook_status["running"] = False
+                _cook_status["current_order"] = None
+                _cook_status["queue_len"] = 0
+                break
+            order = _cook_queue.pop(0)
+            _cook_status["running"] = True
+            _cook_status["current_order"] = order["order_id"]
+            _cook_status["queue_len"] = len(_cook_queue)
+
+        _cook_log(f"START cooking order {order['order_id']}  items={order['item_count']}")
+
+        if SIMULATE_ROBOT:
+            # Simulation: just wait proportional to number of portions
+            cook_secs = 60 * order["item_count"]
+            _cook_log(f"[SIM] Cooking {cook_secs}s for {order['item_count']} portions")
+            time.sleep(cook_secs)
+            _cook_log(f"[SIM] DONE order {order['order_id']}")
+        else:
+            # Real robot: run the cooking program for each portion
+            for i in range(order["item_count"]):
+                _cook_log(f"Portion {i+1}/{order['item_count']}: running robot program")
+                run_program()   # existing pick & place / cooking sequence
+                _cook_log(f"Portion {i+1} done")
+
+        _cook_log(f"COMPLETE order {order['order_id']}")
+
+
+@app.route("/api/cook_order", methods=["POST"])
+def api_cook_order():
+    """
+    Called by Vercel website when customer payment is confirmed.
+    Body: { order_id, item_count, total, items[] }
+    """
+    data = request.get_json(silent=True) or {}
+    order_id   = data.get("order_id", "unknown")
+    item_count = int(data.get("item_count", 1))
+    total      = data.get("total", 0)
+
+    with _cook_lock:
+        # Check for duplicate
+        existing_ids = [o["order_id"] for o in _cook_queue]
+        if order_id in existing_ids or _cook_status.get("current_order") == order_id:
+            return jsonify({"ok": False, "error": "Order already queued"}), 409
+
+        queue_pos = len(_cook_queue)
+        _cook_queue.append({
+            "order_id":   order_id,
+            "item_count": item_count,
+            "total":      total,
+        })
+        _cook_status["queue_len"] = len(_cook_queue)
+        already_running = _cook_status["running"]
+
+    _cook_log(f"QUEUED order {order_id}  pos={queue_pos}  portions={item_count}  total={total}")
+
+    # Start worker thread only if not already running
+    if not already_running:
+        threading.Thread(target=_cook_loop, daemon=True).start()
+
+    return jsonify({
+        "ok":       True,
+        "order_id": order_id,
+        "queue_pos": queue_pos,      # 0 = cooking now, 1+ = waiting
+        "sim":      SIMULATE_ROBOT,
+    })
+
+
+@app.route("/api/cook_status")
+def api_cook_status():
+    with _cook_lock:
+        return jsonify({**_cook_status, "queue_len": len(_cook_queue)})
+
+
 # ── Main ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     # Start weight cache poller
@@ -670,11 +769,14 @@ if __name__ == "__main__":
         if not connect_robot():
             print("WARNING: Could not connect to robot. Server starting anyway.")
 
+    print(f"Weight now sourced from {VERCEL_SCALE_URL} (no LAN/ngrok needed for this part)")
+
     try:
         from pyngrok import ngrok
         tunnel = ngrok.connect(SERVER_PORT, "http")
         print(f"\n{'='*50}")
         print(f"  ngrok URL: {tunnel.public_url}")
+        print(f"  Only needed so Vercel can trigger /api/dispense, /api/cook_order etc.")
         print(f"  Set ROBOT_SERVER_URL={tunnel.public_url} in Vercel env")
         print(f"{'='*50}\n")
     except Exception as e:

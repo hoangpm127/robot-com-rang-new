@@ -1,13 +1,14 @@
 #include <HX711.h>
-#include <ESP8266WiFi.h>
+#include <ESP8266WiFi.h>      // WiFiClient included here
 #include <ESP8266WebServer.h>
+#include <WiFiClientSecure.h> // HTTPS push len Vercel
 #include <EEPROM.h>
 
 // ── EEPROM config ─────────────────────────────────────────────
 #define CAL_MAGIC 0xCAFE
 struct Config { uint16_t magic; float cal; };
 
-float calibrationFactor = 1065.5f;  // khai bao som de EEPROM functions dung duoc
+float calibrationFactor = 1065.5f;
 
 void saveConfig() {
   Config cfg = { CAL_MAGIC, calibrationFactor };
@@ -36,22 +37,34 @@ void loadConfig() {
 #define SCK_PIN   12   // D6
 
 // ── WiFi ─────────────────────────────────────────────────────
-const char* WIFI_SSID = "Wifi mat tien";
-const char* WIFI_PASS = "tamsotam";
+const char* WIFI_SSID = "Chien Thang";
+const char* WIFI_PASS = "88888888";
+
+// ── Vercel push config ─────────────────────────────────────────
+// ESP8266 push thẳng lên web server đã deploy qua HTTPS — không cần
+// cùng mạng LAN với PC, không cần ngrok. Chỉ cần ESP có Internet.
+const char* VERCEL_HOST = "robot-com-rang-new.vercel.app";
+const int   VERCEL_PORT = 443;
+const char* PUSH_PATH   = "/api/scale";
+
+// Push khi cân vừa ổn định, hoặc cứ mỗi PUSH_INTERVAL_MS nếu đang ổn định
+const unsigned long PUSH_COOLDOWN_MS  = 3000;   // tối thiểu 3s giữa 2 lần push
+const unsigned long PUSH_INTERVAL_MS  = 10000;  // push định kỳ mỗi 10s dù stable không đổi
+bool pushEnabled = true;
 
 // ── Filter tuning ─────────────────────────────────────────────
-#define MED_SIZE    7      // median window - loai spike/outlier
-#define EMA_ALPHA   0.25f  // 0.1=mo, 0.5=nhanh - EMA smoothing
-#define DEADBAND    0.3f   // g - bo qua rung nho hon nguong
-#define STABLE_N    10     // so mau de kiem tra on dinh
-#define STABLE_RNG  0.8f   // g - bien dong max de goi la on dinh
+#define MED_SIZE    7
+#define EMA_ALPHA   0.25f
+#define DEADBAND    0.3f
+#define STABLE_N    10
+#define STABLE_RNG  0.8f
 
 // ─────────────────────────────────────────────────────────────
 
 HX711 scale;
 ESP8266WebServer server(80);
 
-// Tang 1: Median filter (chong spike / nhieu dot bien)
+// Tang 1: Median filter
 float medBuf[MED_SIZE] = {0};
 uint8_t medIdx = 0;
 bool medFull = false;
@@ -73,7 +86,7 @@ float applyMedian(float val) {
   return medianOf(medBuf, n);
 }
 
-// Tang 2: EMA - lam tron duong cong
+// Tang 2: EMA
 float emaVal = 0.0f;
 bool  emaInit = false;
 
@@ -83,14 +96,14 @@ float applyEMA(float val) {
   return emaVal;
 }
 
-// Tang 3: Deadband - giu nguyen neu thay doi nho
+// Tang 3: Deadband
 float displayVal = 0.0f;
 
 void applyDeadband(float val) {
   if (fabsf(val - displayVal) > DEADBAND) displayVal = val;
 }
 
-// Kiem tra on dinh (dung EMA output)
+// Kiem tra on dinh
 float stableBuf[STABLE_N] = {0};
 uint8_t stableIdx = 0;
 bool stableFull = false;
@@ -109,7 +122,6 @@ void checkStable(float val) {
   isStable = (mx - mn) < STABLE_RNG;
 }
 
-// Pipeline chinh: goi moi lan co mau moi tu HX711
 void processSample(float raw) {
   float med = applyMedian(raw);
   float ema = applyEMA(med);
@@ -124,6 +136,53 @@ void resetFilters() {
   medFull = stableFull = emaInit = false;
   emaVal = displayVal = 0.0f;
   isStable = false;
+}
+
+// ── Push weight event lên Vercel qua HTTPS ────────────────────
+bool prevStable = false;
+unsigned long lastPushMs = 0;
+unsigned long lastPeriodicPushMs = 0;
+bool lastPushOk = false;
+
+void pushWeightEvent(const char* reason) {
+  if (!pushEnabled) return;
+
+  char body[100];
+  snprintf(body, sizeof(body),
+    "{\"weight\":%.1f,\"stable\":%s,\"reason\":\"%s\"}",
+    displayVal, isStable ? "true" : "false", reason);
+
+  WiFiClientSecure client;
+  client.setInsecure();   // bo qua kiem tra chung chi — don gian hoa cho ESP8266
+  client.setTimeout(4000); // TLS handshake cham hon HTTP thuong
+
+  if (!client.connect(VERCEL_HOST, VERCEL_PORT)) {
+    Serial.println("Push: HTTPS connect failed");
+    lastPushOk = false;
+    return;
+  }
+
+  int bodyLen = strlen(body);
+  client.print("POST "); client.print(PUSH_PATH); client.print(" HTTP/1.1\r\n");
+  client.print("Host: "); client.print(VERCEL_HOST); client.print("\r\n");
+  client.print("Content-Type: application/json\r\n");
+  client.print("Content-Length: "); client.print(bodyLen); client.print("\r\n");
+  client.print("Connection: close\r\n\r\n");
+  client.print(body);
+
+  // Doc dong dau tien cua response de xac nhan HTTP status (khong bat buoc)
+  unsigned long waitStart = millis();
+  String statusLine;
+  while (client.connected() && millis() - waitStart < 3000) {
+    if (client.available()) { statusLine = client.readStringUntil('\n'); break; }
+  }
+  client.stop();
+
+  lastPushOk = statusLine.indexOf("200") > 0;
+  Serial.print("Push ["); Serial.print(reason);
+  Serial.print("] w="); Serial.print(displayVal);
+  Serial.print(" -> "); Serial.println(statusLine.length() ? statusLine : "(no response)");
+  lastPushMs = millis();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -150,6 +209,7 @@ body{font-family:-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;min-h
 .btn:active{opacity:.6}
 .b-blue{background:#2563eb;color:#fff}
 .b-green{background:#16a34a;color:#fff}
+.b-orange{background:#ea580c;color:#fff}
 .g4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:8px}
 .bsm{background:#1e293b;color:#94a3b8;border:1px solid #334155;padding:12px 4px;font-size:14px;font-weight:600;border-radius:10px;cursor:pointer}
 .bsm:active{opacity:.6}
@@ -171,6 +231,7 @@ body{font-family:-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;min-h
 </div>
 <div class="sec">
   <button class="btn b-blue" onclick="doTare()">&#8635; TARE — Ve so 0</button>
+  <button class="btn b-orange" onclick="doPush()">&#8679; Push len Vercel ngay</button>
 </div>
 <div class="sec">
   <h2>Chinh thu cong</h2>
@@ -194,7 +255,8 @@ body{font-family:-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;min-h
   <div class="ir"><span>EMA alpha</span><span class="iv">)=====";
 
 const char HTML2[] PROGMEM = R"=====(</span></div>
-  <div class="ir"><span>IP</span><span class="iv" id="ip">--</span></div>
+  <div class="ir"><span>Push host</span><span class="iv" id="ph">--</span></div>
+  <div class="ir"><span>IP (ESP)</span><span class="iv" id="ip">--</span></div>
 </div>
 <script>
 let prevW=0;
@@ -208,10 +270,12 @@ function upd(){
     b.className='badge '+(d.stable?'st':'ms');
     document.getElementById('cal').textContent=d.cal.toFixed(1);
     document.getElementById('ip').textContent=d.ip;
+    document.getElementById('ph').textContent=d.push_host||'--';
   }).catch(()=>{});
 }
 function doTare(){fetch('/tare').then(()=>{document.getElementById('w').textContent='0.0';prevW=0;});}
 function doCal(d){fetch('/cal?d='+d).then(r=>r.json()).then(v=>document.getElementById('cal').textContent=v.cal.toFixed(1));}
+function doPush(){fetch('/push').then(r=>r.json()).then(v=>alert(v.ok?'Push OK len Vercel':'Push that bai, xem Serial Monitor'));}
 function doCalibrate(){
   const kw=parseFloat(document.getElementById('kw').value);
   if(!kw||kw<=0){alert('Nhap KL hop le!');return;}
@@ -234,18 +298,22 @@ void handleRoot() {
 }
 
 void handleData() {
-  char buf[120];
+  char buf[200];
   snprintf(buf, sizeof(buf),
-    "{\"weight\":%.0f,\"cal\":%.1f,\"stable\":%s,\"ip\":\"%s\"}",
+    "{\"weight\":%.0f,\"cal\":%.1f,\"stable\":%s,\"ip\":\"%s\",\"push_host\":\"%s\",\"last_push_ok\":%s}",
     displayVal, calibrationFactor,
     isStable ? "true" : "false",
-    WiFi.localIP().toString().c_str());
+    WiFi.localIP().toString().c_str(),
+    VERCEL_HOST,
+    lastPushOk ? "true" : "false");
   server.send(200, "application/json", buf);
 }
 
 void handleTare() {
   scale.tare();
   resetFilters();
+  // Báo server.py là cân vừa được tare (bắt đầu đo mới)
+  pushWeightEvent("tare");
   server.send(200, "text/plain", "ok");
 }
 
@@ -272,6 +340,14 @@ void handleCalibrate() {
   server.send(200, "application/json", buf);
 }
 
+void handlePushNow() {
+  // Manual push từ UI để kiểm tra kết nối tới Vercel
+  pushWeightEvent("manual");
+  char buf[60];
+  snprintf(buf, sizeof(buf), "{\"ok\":%s,\"weight\":%.1f}", lastPushOk ? "true" : "false", displayVal);
+  server.send(200, "application/json", buf);
+}
+
 // ─────────────────────────────────────────────────────────────
 
 void setup() {
@@ -279,7 +355,7 @@ void setup() {
   delay(300);
   Serial.println("\n=== ESP8266 LoadCell ===");
 
-  loadConfig();   // load cal da luu tu lan truoc
+  loadConfig();
   scale.begin(DOUT_PIN, SCK_PIN);
   scale.set_scale(calibrationFactor);
   scale.tare();
@@ -290,20 +366,42 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED) { delay(400); Serial.print("."); }
   Serial.print("\n>> http://");
   Serial.println(WiFi.localIP());
+  Serial.print(">> Push to: https://");
+  Serial.print(VERCEL_HOST); Serial.println(PUSH_PATH);
 
   server.on("/",          handleRoot);
   server.on("/data",      handleData);
   server.on("/tare",      handleTare);
   server.on("/cal",       handleCal);
   server.on("/calibrate", handleCalibrate);
+  server.on("/push",      handlePushNow);  // manual push trigger
   server.begin();
 }
 
 void loop() {
-  server.handleClient();          // xu li web request ngay lap tuc
+  server.handleClient();
 
-  if (scale.is_ready()) {         // chi doc khi HX711 co du lieu moi (~10Hz)
+  if (scale.is_ready()) {
     float raw = scale.get_units(1);
     processSample(raw);
+  }
+
+  unsigned long now = millis();
+  bool stableJustChanged = (isStable != prevStable);
+  prevStable = isStable;
+
+  // Push khi cân vừa ổn định (stable transition false→true)
+  if (stableJustChanged && isStable && fabsf(displayVal) > 0.5f) {
+    if (now - lastPushMs >= PUSH_COOLDOWN_MS) {
+      pushWeightEvent("stable");
+    }
+  }
+
+  // Push định kỳ mỗi 10s khi đang ổn định (để server.py cập nhật cache)
+  if (isStable && (now - lastPeriodicPushMs >= PUSH_INTERVAL_MS)) {
+    lastPeriodicPushMs = now;
+    if (now - lastPushMs >= PUSH_COOLDOWN_MS) {
+      pushWeightEvent("periodic");
+    }
   }
 }

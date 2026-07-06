@@ -61,13 +61,14 @@ const float         CHANGE_THRESHOLD_G = 2.0f;   // lech > nguong nay so voi lan
 bool pushEnabled = true;
 
 // ── Filter tuning ─────────────────────────────────────────────
+// Noi them mot chut sai so doi lay toc do (chap nhan duoc +-3-4g).
 // Giam so mau can de "on dinh" + tang EMA_ALPHA -> phan hoi nhanh hon,
 // danh doi mot chut do muot khi ranh (doi tuong dung yen).
-#define MED_SIZE    5
-#define EMA_ALPHA   0.5f
+#define MED_SIZE    3
+#define EMA_ALPHA   0.6f
 #define DEADBAND    0.3f
-#define STABLE_N    5
-#define STABLE_RNG  0.8f
+#define STABLE_N    3
+#define STABLE_RNG  3.0f
 
 // ─────────────────────────────────────────────────────────────
 

@@ -37,8 +37,8 @@ void loadConfig() {
 #define SCK_PIN   12   // D6
 
 // ── WiFi ─────────────────────────────────────────────────────
-const char* WIFI_SSID = "Wifi mat tien";
-const char* WIFI_PASS = "tamsotam";
+const char* WIFI_SSID = "Goc Coffee 5G";
+const char* WIFI_PASS = "66666666";
 
 // ── Vercel push config ─────────────────────────────────────────
 // ESP8266 push thẳng lên web server đã deploy qua HTTPS — không cần
@@ -47,7 +47,8 @@ const char* VERCEL_HOST = "robot-com-rang-new.vercel.app";
 const int   VERCEL_PORT = 443;
 const char* PUSH_PATH   = "/api/scale";
 const char* CMD_PATH    = "/api/scale/command";  // ESP polls day de nhan lenh hieu chinh tu xa
-const unsigned long CMD_POLL_INTERVAL_MS = 1500; // hieu chinh khong can gap, poll thua cung duoc
+const unsigned long CMD_POLL_INTERVAL_MS = 5000; // hieu chinh khong can gap; poll qua day se chan
+                                                  // vong lap chinh vai tram ms, anh huong toc do can
 
 // Push khi cân vừa ổn định, khi đang thay đổi đáng kể, hoặc định kỳ
 const unsigned long PUSH_COOLDOWN_MS   = 200;    // toi thieu giua 2 lan push (co TLS session resumption nen re)

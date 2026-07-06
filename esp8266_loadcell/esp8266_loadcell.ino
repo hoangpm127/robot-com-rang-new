@@ -47,16 +47,19 @@ const char* VERCEL_HOST = "robot-com-rang-new.vercel.app";
 const int   VERCEL_PORT = 443;
 const char* PUSH_PATH   = "/api/scale";
 
-// Push khi cân vừa ổn định, hoặc cứ mỗi PUSH_INTERVAL_MS nếu đang ổn định
-const unsigned long PUSH_COOLDOWN_MS  = 3000;   // tối thiểu 3s giữa 2 lần push
-const unsigned long PUSH_INTERVAL_MS  = 10000;  // push định kỳ mỗi 10s dù stable không đổi
+// Push khi cân vừa ổn định, khi đang thay đổi đáng kể, hoặc định kỳ
+const unsigned long PUSH_COOLDOWN_MS   = 400;    // toi thieu giua 2 lan push (co TLS session resumption nen re)
+const unsigned long PUSH_INTERVAL_MS   = 10000;  // push dinh ky moi 10s du khong doi (bao con song)
+const float         CHANGE_THRESHOLD_G = 3.0f;   // lech > nguong nay so voi lan push truoc -> push ngay, chua can cho stable
 bool pushEnabled = true;
 
 // ── Filter tuning ─────────────────────────────────────────────
-#define MED_SIZE    7
-#define EMA_ALPHA   0.25f
+// Giam so mau can de "on dinh" + tang EMA_ALPHA -> phan hoi nhanh hon,
+// danh doi mot chut do muot khi ranh (doi tuong dung yen).
+#define MED_SIZE    5
+#define EMA_ALPHA   0.5f
 #define DEADBAND    0.3f
-#define STABLE_N    10
+#define STABLE_N    5
 #define STABLE_RNG  0.8f
 
 // ─────────────────────────────────────────────────────────────
@@ -143,6 +146,13 @@ bool prevStable = false;
 unsigned long lastPushMs = 0;
 unsigned long lastPeriodicPushMs = 0;
 bool lastPushOk = false;
+float lastPushedWeight = 0.0f;   // de tinh delta cho trigger "changing"
+
+// Client + session TLS o pham vi global — tai su dung giua cac lan push
+// de resume TLS session thay vi bat tay lai tu dau (nhanh hon dang ke).
+WiFiClientSecure secureClient;
+BearSSL::Session  tlsSession;
+bool secureClientInited = false;
 
 void pushWeightEvent(const char* reason) {
   if (!pushEnabled) return;
@@ -152,9 +162,14 @@ void pushWeightEvent(const char* reason) {
     "{\"weight\":%.1f,\"stable\":%s,\"reason\":\"%s\"}",
     displayVal, isStable ? "true" : "false", reason);
 
-  WiFiClientSecure client;
-  client.setInsecure();   // bo qua kiem tra chung chi — don gian hoa cho ESP8266
-  client.setTimeout(4000); // TLS handshake cham hon HTTP thuong
+  if (!secureClientInited) {
+    secureClient.setInsecure();       // bo qua kiem tra chung chi — don gian hoa cho ESP8266
+    secureClient.setSession(&tlsSession); // resume TLS session giua cac lan goi
+    secureClient.setTimeout(4000);
+    secureClientInited = true;
+  }
+  WiFiClientSecure& client = secureClient;
+  lastPushedWeight = displayVal;   // coi nhu da bao gia tri nay, tranh spam lien tuc
 
   if (!client.connect(VERCEL_HOST, VERCEL_PORT)) {
     Serial.println("Push: HTTPS connect failed");
@@ -417,15 +432,23 @@ void loop() {
   bool stableJustChanged = (isStable != prevStable);
   prevStable = isStable;
 
-  // Push khi cân vừa ổn định (stable transition false→true)
+  // Push ngay khi dang thay doi dang ke (vd vua dat vat len) — phan hoi
+  // nhanh thay vi doi den khi on dinh hoan toan moi thay so nhay.
+  if (fabsf(displayVal - lastPushedWeight) > CHANGE_THRESHOLD_G) {
+    if (now - lastPushMs >= PUSH_COOLDOWN_MS) {
+      pushWeightEvent("changing");
+    }
+  }
+
+  // Push khi cân vừa ổn định (stable transition false→true) — gia tri cuoi cung
   if (stableJustChanged && isStable && fabsf(displayVal) > 0.5f) {
     if (now - lastPushMs >= PUSH_COOLDOWN_MS) {
       pushWeightEvent("stable");
     }
   }
 
-  // Push định kỳ mỗi 10s khi đang ổn định (để server.py cập nhật cache)
-  if (isStable && (now - lastPeriodicPushMs >= PUSH_INTERVAL_MS)) {
+  // Push định kỳ mỗi 10s dù không đổi (để server.py/Vercel biết ESP còn sống)
+  if (now - lastPeriodicPushMs >= PUSH_INTERVAL_MS) {
     lastPeriodicPushMs = now;
     if (now - lastPushMs >= PUSH_COOLDOWN_MS) {
       pushWeightEvent("periodic");

@@ -19,7 +19,7 @@ export default function ScalePage() {
         .then(setData)
         .catch(() => {})
     tick()
-    const id = setInterval(tick, 500)
+    const id = setInterval(tick, 250)
     return () => clearInterval(id)
   }, [])
 

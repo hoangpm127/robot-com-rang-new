@@ -8,7 +8,9 @@ let latest = { weight: 0, stable: false, updatedAt: 0 }
 
 export async function GET() {
   const age = Date.now() - latest.updatedAt
-  return Response.json({ ...latest, stale: latest.updatedAt === 0 || age > 8000 })
+  // ESP heartbeat moi 10s toi da khi khong doi gi — cho bien do de tranh
+  // bao "stale" gia giua 2 lan heartbeat binh thuong
+  return Response.json({ ...latest, stale: latest.updatedAt === 0 || age > 15000 })
 }
 
 export async function POST(req: Request) {

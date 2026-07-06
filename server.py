@@ -23,10 +23,18 @@ VERCEL_SCALE_URL = "https://robot-com-rang-new.vercel.app/api/scale"
 
 # ── Dosing pump config ───────────────────────────────────────
 PUMP_DO_PORT      = 1      # Output1 — DO port wired to dosing pump/nguyen lieu
-PUMP_INITIAL_SEC  = 1.0    # First pump burst duration
 PUMP_CORRECT_SEC  = 0.2    # Correction burst duration
 MAX_CORRECTIONS   = 8      # Max correction bursts before giving up
 VALID_TARGETS     = {100, 200, 300}
+
+# Measured via /api/calibrate_pump: tare on /scale, fire the pump for
+# exactly 1s, read the resulting weight -> that's grams/second. Fill in
+# the real number here once measured; None falls back to a fixed 1.0s
+# initial burst regardless of target (the old behavior).
+PUMP_RATE_G_PER_SEC = None   # vd: 85.0 neu do duoc 85g sau 1s
+PUMP_INITIAL_SEC_FALLBACK = 1.0   # dung khi chua co PUMP_RATE_G_PER_SEC
+PUMP_INITIAL_SEC_MIN = 0.2   # san duoi, tranh bom qua ngan khong co tac dung
+PUMP_INITIAL_SEC_MAX = 3.0   # tran tren, tranh tinh sai ra thoi gian bom qua dai
 
 # Doing's own stability check — deliberately NOT the ESP's "stable" flag.
 # That flag is tuned loose (STABLE_N=2, RNG=4.5g) for a snappy web display
@@ -413,8 +421,17 @@ def _run_dosing_core(target: int) -> str:
     try:
         _dlog(f"START target={target}g{' [SIM]' if SIMULATE_ROBOT else ''}")
 
-        # Initial pump
-        _robot_pump(PUMP_INITIAL_SEC)
+        # Initial pump — scaled to target using the measured g/s rate so
+        # the first burst already lands close, instead of always firing a
+        # fixed 1s regardless of whether target is 100g or 300g.
+        if PUMP_RATE_G_PER_SEC and PUMP_RATE_G_PER_SEC > 0:
+            initial_sec = target / PUMP_RATE_G_PER_SEC
+            initial_sec = max(PUMP_INITIAL_SEC_MIN, min(PUMP_INITIAL_SEC_MAX, initial_sec))
+        else:
+            initial_sec = PUMP_INITIAL_SEC_FALLBACK
+        _dlog(f"Initial pump: {initial_sec:.2f}s "
+              f"({'rate-based' if PUMP_RATE_G_PER_SEC else 'fallback'})")
+        _robot_pump(initial_sec)
 
         for attempt in range(MAX_CORRECTIONS + 1):
             with dispense_lock:
@@ -736,6 +753,35 @@ def api_weight():
         "sim":     SIMULATE_ROBOT,
         "stale":   age > 5,
     })
+
+@app.route("/api/calibrate_pump", methods=["POST"])
+def api_calibrate_pump():
+    """
+    Fires the pump for an exact duration so you can measure g/s rate:
+    1. Empty the cup, TARE on /scale (weight -> 0)
+    2. POST here with duration_sec (default 1.0)
+    3. Read the resulting weight on /scale -> that's grams/second
+    4. Put that number into PUMP_RATE_G_PER_SEC at the top of this file
+       and restart server.py
+    """
+    with dispense_lock:
+        if dispense_state["running"]:
+            return jsonify({"error": "Dispensing in progress, try again after"}), 409
+
+    data = request.get_json(silent=True) or {}
+    duration = float(data.get("duration_sec", 1.0))
+    if not (0 < duration <= 10):
+        return jsonify({"error": "duration_sec must be between 0 and 10"}), 400
+
+    def _run():
+        with robot_lock:
+            send_cmd("ClearError()", 0.5)
+            send_cmd("EnableRobot()", 2.0)
+            _robot_pump(duration)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"started": True, "duration_sec": duration})
+
 
 @app.route("/api/dispense", methods=["POST"])
 def api_dispense():

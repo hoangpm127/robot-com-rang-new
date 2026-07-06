@@ -37,6 +37,10 @@ export async function POST(req: Request) {
     return Response.json({ error: 'bad body' }, { status: 400 })
   }
 
+  // Small incrementing id, not Date.now(): ESP parses it as a 32-bit
+  // float/unsigned long, which can't hold a 13-digit ms timestamp without
+  // losing precision. Two round trips here is fine — this only runs on a
+  // button click, not the continuous weight poll/push hot path.
   const id = await redis.incr(ID_KEY)
 
   let cmd: Command

@@ -51,7 +51,11 @@ const unsigned long CMD_POLL_INTERVAL_MS = 5000; // hieu chinh khong can gap; po
                                                   // vong lap chinh vai tram ms, anh huong toc do can
 
 // Push khi cân vừa ổn định, khi đang thay đổi đáng kể, hoặc định kỳ
-const unsigned long PUSH_COOLDOWN_MS   = 200;    // toi thieu giua 2 lan push (co TLS session resumption nen re)
+const unsigned long PUSH_COOLDOWN_MS   = 200;    // rieng cho "stable" — phan hoi ngay khi that su on dinh
+const unsigned long CHANGE_COOLDOWN_MS = 700;    // rieng cho "changing" — moi lan push la 1 lenh blocking,
+                                                  // ban don dap trong luc dat vat len se chinh no lam cham
+                                                  // buffer on dinh tich luy mau (khong doc duoc HX711 trong
+                                                  // luc dang cho phan hoi mang)
 const unsigned long PUSH_INTERVAL_MS   = 10000;  // push dinh ky moi 10s du khong doi (bao con song)
 const float         CHANGE_THRESHOLD_G = 2.0f;   // lech > nguong nay so voi lan push truoc -> push ngay, chua can cho stable
 bool pushEnabled = true;
@@ -529,9 +533,12 @@ void loop() {
   prevStable = isStable;
 
   // Push ngay khi dang thay doi dang ke (vd vua dat vat len) — phan hoi
-  // nhanh thay vi doi den khi on dinh hoan toan moi thay so nhay.
+  // nhanh thay vi doi den khi on dinh hoan toan moi thay so nhay. Dung
+  // cooldown rieng, dai hon: moi push la 1 lenh mang blocking ca vong lap,
+  // ban qua day trong luc dang dat vat se lam cham chinh viec buffer on
+  // dinh tich luy du mau (khong doc duoc HX711 luc dang cho phan hoi).
   if (fabsf(displayVal - lastPushedWeight) > CHANGE_THRESHOLD_G) {
-    if (now - lastPushMs >= PUSH_COOLDOWN_MS) {
+    if (now - lastPushMs >= CHANGE_COOLDOWN_MS) {
       pushWeightEvent("changing");
     }
   }

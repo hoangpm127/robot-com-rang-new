@@ -6,7 +6,7 @@ Weight comes from ESP8266 -> Vercel (/api/scale) -> polled here, no LAN/ngrok
 needed for that part. ngrok is only needed so the deployed website can reach
 this PC to trigger /api/dispense, /api/run, /api/cook_order etc.
 """
-import threading, time, socket, re, random
+import threading, time, socket, re, random, json, os
 from collections import deque
 import requests as req
 from flask import Flask, jsonify, request, render_template_string
@@ -36,16 +36,20 @@ DOSE_STABLE_WINDOW_SEC  = 1.2   # xet cac mau trong bao nhieu giay gan nhat
 DOSE_STABLE_TOLERANCE_G = 1.0   # bien do toi da cho phep trong khoang do
 DOSE_STABLE_MAX_WAIT_SEC = 4.0  # cho toi da tung nay giay roi dung so tot nhat co
 
+# Weight target used for the automatic cook cycle triggered by checkout —
+# order doesn't currently carry per-item portion detail through to here,
+# so every item doses to this same default ("full" tier of VALID_TARGETS).
+DEFAULT_TARGET_WEIGHT = 200
+
 # Set True until real robot is connected → weight/pump are simulated
 SIMULATE_ROBOT = False
 
-# Joint angles from point.json
-JOINTS = {
-    "P1": (-83.353271, 18.568611, -63.483124, -43.27755,  96.860619, 8.817215),
-    "P2": (-91.84021,  -23.438988, -93.522491, 29.492798,  84.309769, 8.815842),
-    "P3": (-91.823776, -26.856602, -97.371941, 36.764336,  84.32135,  8.768964),
-    "P4": (-15.731392,  11.357117, -83.433609, -14.995651, 95.032425, 8.783226),
-}
+# Cartesian pose per point, loaded from code_robot/point.json (the project
+# exported from DobotStudio Pro — same points src0.lua's MovJ/MovL refer to
+# by name). {"P1": (x,y,z,rx,ry,rz), ...}
+_HERE = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(_HERE, "code_robot", "point.json"), encoding="utf-8") as _f:
+    POINTS = {p["name"]: tuple(p["pose"]) for p in json.load(_f)}
 
 ROBOT_MODES = {1:"INIT",2:"BRAKE",4:"DISABLED",5:"ENABLE",6:"BACKDRIVE",
                7:"RUNNING",8:"RECORDING",9:"ERROR",10:"PAUSE",11:"JOG"}
@@ -60,7 +64,9 @@ state = {
     "log": [],
     "error": None,
 }
-robot_lock = threading.Lock()
+robot_lock = threading.RLock()  # RLock: run_cooking_cycle holds it for the
+                                 # whole sequence while _move()/_do_pin()/
+                                 # _robot_pump() each also acquire it per-call
 sock = None
 
 # ── Simulation weight ─────────────────────────────────────────
@@ -206,77 +212,80 @@ def refresh_state():
     except:
         pass
 
-def get_current_joints():
-    for attempt in range(3):
-        if len(state["joints"]) == 6:
-            return tuple(state["joints"])
-        send_cmd("ClearError()", 0.3)
-        time.sleep(0.5)
-        r = send_cmd("GetAngle()", 0.4)
-        if r.startswith("0,"):
-            nums = re.findall(r"[-\d.]+", r.split("{")[1].split("}")[0])
-            if len(nums) == 6:
-                state["joints"] = [round(float(v), 2) for v in nums]
-                return tuple(state["joints"])
-        time.sleep(0.5)
-    raise RuntimeError("Cannot read joint angles from robot")
+# ── MovJ/MovL by named point (dashboard command, not ServoJ streaming) ─
+# Translated from code_robot/src0.lua — that project uses MovJ/MovL to
+# named points, which need the robot's own path planner (important for
+# MovL's straight-line motion during the scoop/pour). Verified working
+# against the real robot via run_full_sequence.py before being folded in
+# here: syntax must be MovJ(pose={x,y,z,rx,ry,rz},user=0,tool=1) — plain
+# positional args return error -30001 (bad parameter type).
 
-def servoj_stream(target, duration=4.0):
-    current = get_current_joints()
-    steps = max(int(duration * 10), 5)
-    log(f"Moving {steps} steps -> {[round(v,1) for v in target]}")
-    for i in range(1, steps + 1):
-        t = i / steps
-        ts = t * t * (3 - 2 * t)
-        pt = tuple(c + (g - c) * ts for c, g in zip(current, target))
-        if len(pt) != 6:
-            raise RuntimeError(f"Bad trajectory point length: {len(pt)}")
-        cmd = "ServoJ({:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f})\n".format(*pt)
-        try:
-            sock.sendall(cmd.encode())
-        except OSError:
-            if not _reconnect():
-                raise RuntimeError("Lost connection during ServoJ stream")
-            send_cmd("ClearError()", 0.3)
-            send_cmd("EnableRobot()", 2.0)
-            sock.sendall(cmd.encode())
-        time.sleep(0.1)
-    state["joints"] = list(target)
-    time.sleep(0.8)
+def _wait_motion_idle(max_wait=20.0):
+    """Poll RobotMode() until a queued MovJ/MovL finishes (leaves 7=RUNNING)."""
+    start = time.time()
+    while time.time() - start < max_wait:
+        r = send_cmd("RobotMode()", 0.3)
+        if "{9}" in r:
+            raise RuntimeError("Robot entered ERROR mode during motion")
+        if "{7}" not in r:
+            return
+        time.sleep(0.2)
+    raise RuntimeError("Motion did not finish within timeout")
+
+def _move(cmd_name: str, point_name: str):
+    """MovJ or MovL to a named point from POINTS, then block until done."""
+    with robot_lock:
+        p = POINTS[point_name]
+        pose = "{{{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}}}".format(*p)
+        r = send_cmd(f"{cmd_name}(pose={pose},user=0,tool=1)", 0.3)
+        if not r.startswith("0,"):
+            raise RuntimeError(f"{cmd_name}({point_name}) failed: {r}")
+        _wait_motion_idle()
+
+def _do_pin(index: int, value: int):
+    with robot_lock:
+        r = send_cmd(f"DO({index},{value})", 0.2)
+        if not r.startswith("0,"):
+            raise RuntimeError(f"DO({index},{value}) failed: {r}")
+
+def run_motion_sequence():
+    """Scoop/pour/place cycle from code_robot/src0.lua. Assumes the
+    ingredient has already been dosed (DO1 handled separately by dosing)."""
+    _move("MovJ", "P3")
+    _move("MovL", "P4")
+    _do_pin(2, 1)   # grip ON
+    _move("MovL", "P1")
+    _move("MovL", "P2")
+    _move("MovL", "P6")
+    _move("MovL", "P9")
+    for _ in range(4):
+        _move("MovJ", "P7")
+        _move("MovL", "P8")
+    _move("MovJ", "P6")
+    _move("MovL", "P2")
+    _move("MovL", "P1")
+    _move("MovL", "P10")
+    _do_pin(2, 0)   # grip OFF
+    _move("MovL", "P3")
 
 def run_program():
+    """Manual test entrypoint (/api/run button on the mobile panel) — same
+    dosing+motion cycle as the automatic checkout flow, using a default
+    target weight since there's no order context here."""
     with robot_lock:
         state["busy"] = True
         try:
             log("ClearError + Enable")
             send_cmd("ClearError()", 0.5)
             send_cmd("EnableRobot()", 2.5)
-            send_cmd("SpeedFactor(20)", 0.3)
+            send_cmd("SpeedFactor(30)", 0.3)
 
-            log("-> P1 Home")
-            servoj_stream(JOINTS["P1"], 5.0)
+            log(f"Dosing to {DEFAULT_TARGET_WEIGHT}g...")
+            result = _run_dosing_core(DEFAULT_TARGET_WEIGHT)
+            log(f"Dosing result: {result}")
 
-            log("-> P2 approach")
-            servoj_stream(JOINTS["P2"], 4.0)
-
-            log("-> P3 pick")
-            servoj_stream(JOINTS["P3"], 2.0)
-
-            log("DO(1,1) gripper ON")
-            send_cmd("DO(1,1)", 0.3)
-            time.sleep(5.0)
-
-            send_cmd("DO(2,1)", 0.3)
-            send_cmd("DO(1,0)", 0.3)
-
-            log("-> P2 retract")
-            servoj_stream(JOINTS["P2"], 2.0)
-
-            log("-> P4 place")
-            servoj_stream(JOINTS["P4"], 5.0)
-
-            log("DO(2,0) release")
-            send_cmd("DO(2,0)", 0.3)
+            log("Running motion sequence...")
+            run_motion_sequence()
 
             log("Program complete!")
         except Exception as e:
@@ -371,15 +380,18 @@ def _wait_for_dosing_stable(max_wait: float = DOSE_STABLE_MAX_WAIT_SEC) -> tuple
     return last, False
 
 
-def _dispense_loop(target: int):
+def _run_dosing_core(target: int) -> str:
     """
-    Full dosing sequence (runs in daemon thread):
+    Full dosing sequence, synchronous — safe to call directly from within
+    an already-running thread (e.g. run_cooking_cycle), not just via the
+    standalone /api/dispense endpoint's own thread:
       1. Initial 1 s pump burst
       2. Wait for the weight to genuinely settle (our own stricter check,
          not the ESP's loose display-oriented "stable" flag)
       3. Read weight; if >= target → done
       4. Else fire 0.2 s correction burst, repeat from 2
       Max MAX_CORRECTIONS correction bursts before giving up.
+    Returns: "ok" | "underweight" | "esp_error" | "<exception message>"
     """
     global _sim_weight
 
@@ -416,7 +428,7 @@ def _dispense_loop(target: int):
                 with dispense_lock:
                     dispense_state.update({"running": False, "status": "error",
                                            "result": "esp_error"})
-                return
+                return "esp_error"
             if not confirmed:
                 _dlog(f"WARNING: not settled within {DOSE_STABLE_MAX_WAIT_SEC}s, "
                       f"using best reading anyway")
@@ -430,14 +442,14 @@ def _dispense_loop(target: int):
                 _dlog(f"OK {weight:.0f}g >= {target}g after {attempt+1} pump(s)")
                 with dispense_lock:
                     dispense_state.update({"running": False, "status": "done", "result": "ok"})
-                return
+                return "ok"
 
             if attempt >= MAX_CORRECTIONS:
                 _dlog(f"MAX_CORRECTIONS reached: {weight:.0f}g < {target}g")
                 with dispense_lock:
                     dispense_state.update({"running": False, "status": "done",
                                            "result": "underweight"})
-                return
+                return "underweight"
 
             deficit = target - weight
             _dlog(f"Need +{deficit:.0f}g → correction {PUMP_CORRECT_SEC}s")
@@ -449,6 +461,43 @@ def _dispense_loop(target: int):
         _dlog(f"EXCEPTION: {e}")
         with dispense_lock:
             dispense_state.update({"running": False, "status": "error", "result": str(e)})
+        return str(e)
+
+
+def _dispense_loop(target: int):
+    """Thread entrypoint for the standalone /api/dispense endpoint (manual
+    kitchen testing) — just runs the core logic, state updates happen there."""
+    _run_dosing_core(target)
+
+
+def run_cooking_cycle(target_weight: int = DEFAULT_TARGET_WEIGHT):
+    """
+    Full automatic cycle triggered when a customer confirms payment:
+      1. Dose the ingredient to target_weight, using the scale's feedback
+         (weight-aware — not the Lua project's blind 1s DO(1,1) pulse)
+      2. Run the scoop/pour/place motion sequence (from src0.lua)
+    One call = one portion. _cook_loop calls this once per ordered portion.
+    """
+    with robot_lock:
+        state["busy"] = True
+        try:
+            send_cmd("ClearError()", 0.5)
+            send_cmd("EnableRobot()", 2.5)
+            send_cmd("SpeedFactor(30)", 0.3)
+
+            _cook_log(f"Dosing to {target_weight}g...")
+            result = _run_dosing_core(target_weight)
+            _cook_log(f"Dosing result: {result}")
+            if result not in ("ok",):
+                _cook_log(f"Dosing did not confirm target ({result}) — "
+                          f"continuing with motion sequence anyway")
+
+            _cook_log("Running motion sequence...")
+            run_motion_sequence()
+            _cook_log("Motion sequence complete")
+        finally:
+            state["busy"] = False
+            refresh_state()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -520,10 +569,14 @@ MOBILE_HTML = """<!DOCTYPE html>
 <div class="section">
   <h2>Move to Point</h2>
   <div class="grid2">
-    <button class="btn btn-blue" onclick="moveTo('P1')">P1 Home</button>
-    <button class="btn btn-blue" onclick="moveTo('P2')">P2 Approach</button>
-    <button class="btn btn-blue" onclick="moveTo('P3')">P3 Pick</button>
-    <button class="btn btn-blue" onclick="moveTo('P4')">P4 Place</button>
+    <button class="btn btn-blue" onclick="moveTo('P1')">P1 gap_len</button>
+    <button class="btn btn-blue" onclick="moveTo('P2')">P2 gap-ra</button>
+    <button class="btn btn-blue" onclick="moveTo('P3')">P3 truoc-gap</button>
+    <button class="btn btn-blue" onclick="moveTo('P4')">P4 sau-gap</button>
+    <button class="btn btn-blue" onclick="moveTo('P6')">P6 trung-gian</button>
+    <button class="btn btn-blue" onclick="moveTo('P7')">P7 diem-do</button>
+    <button class="btn btn-blue" onclick="moveTo('P8')">P8 nhap-nha</button>
+    <button class="btn btn-blue" onclick="moveTo('P9')">P9 truoc-do</button>
   </div>
 </div>
 
@@ -624,7 +677,7 @@ def api_move():
     if state["busy"]:
         return jsonify({"status": "busy", "message": "Robot busy"})
     point = request.json.get("point", "P1")
-    if point not in JOINTS:
+    if point not in POINTS:
         return jsonify({"status": "error", "message": f"Unknown point {point}"})
     def do_move():
         with robot_lock:
@@ -632,9 +685,9 @@ def api_move():
             try:
                 send_cmd("ClearError()", 0.3)
                 send_cmd("EnableRobot()", 2.0)
-                send_cmd("SpeedFactor(20)", 0.3)
+                send_cmd("SpeedFactor(30)", 0.3)
                 log(f"Moving to {point}")
-                servoj_stream(JOINTS[point], 4.0)
+                _move("MovJ", point)
                 log(f"Reached {point}")
             finally:
                 state["busy"] = False
@@ -741,10 +794,10 @@ def _cook_loop():
             time.sleep(cook_secs)
             _cook_log(f"[SIM] DONE order {order['order_id']}")
         else:
-            # Real robot: run the cooking program for each portion
+            # Real robot: dose + scoop/pour/place cycle for each portion
             for i in range(order["item_count"]):
-                _cook_log(f"Portion {i+1}/{order['item_count']}: running robot program")
-                run_program()   # existing pick & place / cooking sequence
+                _cook_log(f"Portion {i+1}/{order['item_count']}: starting cook cycle")
+                run_cooking_cycle(DEFAULT_TARGET_WEIGHT)
                 _cook_log(f"Portion {i+1} done")
 
         _cook_log(f"COMPLETE order {order['order_id']}")

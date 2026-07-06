@@ -32,6 +32,16 @@ export default function PayPage({ params }: { params: Promise<{ id: string }> })
     const rawSecs = Math.round((data.waitMs ?? 0) / 1000)
     queueSecsRef.current = Math.max(0, rawSecs - 3)
     setState('success')
+
+    // Trigger the robot's actual cook cycle (dosing + scoop/pour/place).
+    // Best-effort: if the robot PC/ngrok tunnel is down, don't block the
+    // customer's success screen on it — the cooking countdown shown here
+    // is a simulated estimate either way.
+    fetch('/api/robot/cook_order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_id: id, item_count: portionCount, total }),
+    }).catch(() => {})
   }
 
   // 3s countdown on success screen → queued or cooking

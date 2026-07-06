@@ -37,8 +37,8 @@ void loadConfig() {
 #define SCK_PIN   12   // D6
 
 // ── WiFi ─────────────────────────────────────────────────────
-const char* WIFI_SSID = "Chien Thang";
-const char* WIFI_PASS = "88888888";
+const char* WIFI_SSID = "Wifi mat tien";
+const char* WIFI_PASS = "tamsotam";
 
 // ── Vercel push config ─────────────────────────────────────────
 // ESP8266 push thẳng lên web server đã deploy qua HTTPS — không cần
@@ -46,11 +46,13 @@ const char* WIFI_PASS = "88888888";
 const char* VERCEL_HOST = "robot-com-rang-new.vercel.app";
 const int   VERCEL_PORT = 443;
 const char* PUSH_PATH   = "/api/scale";
+const char* CMD_PATH    = "/api/scale/command";  // ESP polls day de nhan lenh hieu chinh tu xa
+const unsigned long CMD_POLL_INTERVAL_MS = 1500; // hieu chinh khong can gap, poll thua cung duoc
 
 // Push khi cân vừa ổn định, khi đang thay đổi đáng kể, hoặc định kỳ
-const unsigned long PUSH_COOLDOWN_MS   = 400;    // toi thieu giua 2 lan push (co TLS session resumption nen re)
+const unsigned long PUSH_COOLDOWN_MS   = 200;    // toi thieu giua 2 lan push (co TLS session resumption nen re)
 const unsigned long PUSH_INTERVAL_MS   = 10000;  // push dinh ky moi 10s du khong doi (bao con song)
-const float         CHANGE_THRESHOLD_G = 3.0f;   // lech > nguong nay so voi lan push truoc -> push ngay, chua can cho stable
+const float         CHANGE_THRESHOLD_G = 2.0f;   // lech > nguong nay so voi lan push truoc -> push ngay, chua can cho stable
 bool pushEnabled = true;
 
 // ── Filter tuning ─────────────────────────────────────────────
@@ -147,6 +149,7 @@ unsigned long lastPushMs = 0;
 unsigned long lastPeriodicPushMs = 0;
 bool lastPushOk = false;
 float lastPushedWeight = 0.0f;   // de tinh delta cho trigger "changing"
+unsigned long lastAppliedCommandId = 0;  // id lenh hieu chinh gan nhat da ap dung
 
 // Client + session TLS o pham vi global — tai su dung giua cac lan push
 // de resume TLS session thay vi bat tay lai tu dau (nhanh hon dang ke).
@@ -157,10 +160,10 @@ bool secureClientInited = false;
 void pushWeightEvent(const char* reason) {
   if (!pushEnabled) return;
 
-  char body[100];
+  char body[160];
   snprintf(body, sizeof(body),
-    "{\"weight\":%.1f,\"stable\":%s,\"reason\":\"%s\"}",
-    displayVal, isStable ? "true" : "false", reason);
+    "{\"weight\":%.1f,\"stable\":%s,\"reason\":\"%s\",\"cal\":%.2f,\"lastAppliedId\":%lu}",
+    displayVal, isStable ? "true" : "false", reason, calibrationFactor, lastAppliedCommandId);
 
   if (!secureClientInited) {
     secureClient.setInsecure();       // bo qua kiem tra chung chi — don gian hoa cho ESP8266
@@ -198,6 +201,85 @@ void pushWeightEvent(const char* reason) {
   Serial.print("] w="); Serial.print(displayVal);
   Serial.print(" -> "); Serial.println(statusLine.length() ? statusLine : "(no response)");
   lastPushMs = millis();
+}
+
+// ── Poll lenh hieu chinh tu xa (tu trang /scale tren Vercel) ──
+// ESP khong nhan duoc ket noi tu ben ngoai nen phai tu hoi dinh ky,
+// giong y het ly do server.py can polling thay vi ngrok goi vao.
+
+float extractNumberAfter(const String& src, const char* key) {
+  int idx = src.indexOf(key);
+  if (idx < 0) return NAN;
+  idx += strlen(key);
+  int end = idx;
+  while (end < (int)src.length() &&
+         (isDigit(src[end]) || src[end] == '-' || src[end] == '.')) end++;
+  if (end == idx) return NAN;
+  return src.substring(idx, end).toFloat();
+}
+
+String extractStringAfter(const String& src, const char* key) {
+  int idx = src.indexOf(key);
+  if (idx < 0) return "";
+  idx += strlen(key);
+  if (idx >= (int)src.length() || src[idx] != '"') return "";
+  idx++;
+  int end = src.indexOf('"', idx);
+  if (end < 0) return "";
+  return src.substring(idx, end);
+}
+
+void pollRemoteCommand() {
+  if (!secureClientInited) {
+    secureClient.setInsecure();
+    secureClient.setSession(&tlsSession);
+    secureClient.setTimeout(4000);
+    secureClientInited = true;
+  }
+  WiFiClientSecure& client = secureClient;
+
+  if (!client.connect(VERCEL_HOST, VERCEL_PORT)) {
+    Serial.println("Cmd poll: HTTPS connect failed");
+    return;
+  }
+  client.print("GET "); client.print(CMD_PATH); client.print(" HTTP/1.1\r\n");
+  client.print("Host: "); client.print(VERCEL_HOST); client.print("\r\n");
+  client.print("Connection: close\r\n\r\n");
+
+  String resp;
+  resp.reserve(256);
+  unsigned long start = millis();
+  while (client.connected() && millis() - start < 4000) {
+    while (client.available()) resp += (char)client.read();
+  }
+  client.stop();
+
+  if (resp.indexOf("\"command\":null") >= 0) return;   // khong co lenh nao dang cho
+  if (resp.indexOf("\"command\":{") < 0) return;        // response bat thuong, bo qua
+
+  float idF = extractNumberAfter(resp, "\"id\":");
+  String action = extractStringAfter(resp, "\"action\":");
+  if (isnan(idF) || action.length() == 0) return;
+
+  if (action == "tare") {
+    doTare();
+    Serial.println("Cmd applied: tare");
+  } else if (action == "cal_adjust") {
+    float delta = extractNumberAfter(resp, "\"delta\":");
+    if (isnan(delta)) return;
+    doCalAdjust(delta);
+    Serial.print("Cmd applied: cal_adjust "); Serial.println(delta);
+  } else if (action == "calibrate") {
+    float kw = extractNumberAfter(resp, "\"knownWeight\":");
+    if (isnan(kw) || kw <= 0) return;
+    doCalibrate(kw);
+    Serial.print("Cmd applied: calibrate "); Serial.println(kw);
+  } else {
+    return; // action la, khong xu ly
+  }
+
+  lastAppliedCommandId = (unsigned long)idF;
+  pushWeightEvent("cal_applied");  // bao ngay cal moi + lastAppliedId cho trang /scale biet
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -324,18 +406,36 @@ void handleData() {
   server.send(200, "application/json", buf);
 }
 
-void handleTare() {
+// Logic loi — dung chung cho ca HTTP handler local lan lenh tu xa qua Vercel
+void doTare() {
   scale.tare();
   resetFilters();
+}
+
+void doCalAdjust(float delta) {
+  calibrationFactor += delta;
+  scale.set_scale(calibrationFactor);
+  saveConfig();
+}
+
+void doCalibrate(float knownWeight) {
+  scale.set_scale(1.0f);
+  float raw1 = scale.get_units(8);
+  calibrationFactor = raw1 / knownWeight;
+  scale.set_scale(calibrationFactor);
+  saveConfig();
+  resetFilters();
+}
+
+void handleTare() {
+  doTare();
   // Báo server.py là cân vừa được tare (bắt đầu đo mới)
   pushWeightEvent("tare");
   server.send(200, "text/plain", "ok");
 }
 
 void handleCal() {
-  calibrationFactor += server.arg("d").toFloat();
-  scale.set_scale(calibrationFactor);
-  saveConfig();
+  doCalAdjust(server.arg("d").toFloat());
   char buf[40];
   snprintf(buf, sizeof(buf), "{\"cal\":%.1f}", calibrationFactor);
   server.send(200, "application/json", buf);
@@ -344,12 +444,7 @@ void handleCal() {
 void handleCalibrate() {
   float known = server.arg("w").toFloat();
   if (known <= 0) { server.send(400, "text/plain", "bad"); return; }
-  scale.set_scale(1.0f);
-  float raw1 = scale.get_units(8);
-  calibrationFactor = raw1 / known;
-  scale.set_scale(calibrationFactor);
-  saveConfig();
-  resetFilters();
+  doCalibrate(known);
   char buf[40];
   snprintf(buf, sizeof(buf), "{\"cal\":%.2f}", calibrationFactor);
   server.send(200, "application/json", buf);
@@ -453,5 +548,12 @@ void loop() {
     if (now - lastPushMs >= PUSH_COOLDOWN_MS) {
       pushWeightEvent("periodic");
     }
+  }
+
+  // Hoi xem co lenh hieu chinh nao tu trang /scale dang cho khong
+  static unsigned long lastCmdPollMs = 0;
+  if (now - lastCmdPollMs >= CMD_POLL_INTERVAL_MS) {
+    lastCmdPollMs = now;
+    pollRemoteCommand();
   }
 }

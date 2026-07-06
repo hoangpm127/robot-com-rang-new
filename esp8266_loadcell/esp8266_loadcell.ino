@@ -52,7 +52,7 @@ const unsigned long CMD_POLL_INTERVAL_MS = 5000; // hieu chinh khong can gap; po
 
 // Push khi cân vừa ổn định, khi đang thay đổi đáng kể, hoặc định kỳ
 const unsigned long PUSH_COOLDOWN_MS   = 200;    // rieng cho "stable" — phan hoi ngay khi that su on dinh
-const unsigned long CHANGE_COOLDOWN_MS = 700;    // rieng cho "changing" — moi lan push la 1 lenh blocking,
+const unsigned long CHANGE_COOLDOWN_MS = 400;    // rieng cho "changing" — moi lan push la 1 lenh blocking,
                                                   // ban don dap trong luc dat vat len se chinh no lam cham
                                                   // buffer on dinh tich luy mau (khong doc duoc HX711 trong
                                                   // luc dang cho phan hoi mang)
@@ -61,14 +61,14 @@ const float         CHANGE_THRESHOLD_G = 2.0f;   // lech > nguong nay so voi lan
 bool pushEnabled = true;
 
 // ── Filter tuning ─────────────────────────────────────────────
-// Noi them mot chut sai so doi lay toc do (chap nhan duoc +-3-4g).
-// Giam so mau can de "on dinh" + tang EMA_ALPHA -> phan hoi nhanh hon,
-// danh doi mot chut do muot khi ranh (doi tuong dung yen).
+// Day tiep ve phia muc +-3-4g da duoc chap nhan (dang do thuc te ~1g,
+// con du dia). MED_SIZE giu nguyen 3 — day la san thuc te de median
+// filter con loc duoc spike (median cua 2 mau khong loc duoc gi ca).
 #define MED_SIZE    3
-#define EMA_ALPHA   0.6f
+#define EMA_ALPHA   0.7f
 #define DEADBAND    0.3f
-#define STABLE_N    3
-#define STABLE_RNG  3.0f
+#define STABLE_N    2
+#define STABLE_RNG  4.5f
 
 // ─────────────────────────────────────────────────────────────
 

@@ -7,6 +7,7 @@ needed for that part. ngrok is only needed so the deployed website can reach
 this PC to trigger /api/dispense, /api/run, /api/cook_order etc.
 """
 import threading, time, socket, re, random
+from collections import deque
 import requests as req
 from flask import Flask, jsonify, request, render_template_string
 
@@ -24,9 +25,16 @@ VERCEL_SCALE_URL = "https://robot-com-rang-new.vercel.app/api/scale"
 PUMP_DO_PORT      = 1      # Output1 — DO port wired to dosing pump/nguyen lieu
 PUMP_INITIAL_SEC  = 1.0    # First pump burst duration
 PUMP_CORRECT_SEC  = 0.2    # Correction burst duration
-SETTLE_TIME       = 1.2    # Seconds to wait for dynamic weight to stabilise
 MAX_CORRECTIONS   = 8      # Max correction bursts before giving up
 VALID_TARGETS     = {100, 200, 300}
+
+# Doing's own stability check — deliberately NOT the ESP's "stable" flag.
+# That flag is tuned loose (STABLE_N=2, RNG=4.5g) for a snappy web display
+# and can flag prematurely mid-pour. Dosing decisions need to be sure the
+# reading has truly settled, so we check our own rolling history instead.
+DOSE_STABLE_WINDOW_SEC  = 1.2   # xet cac mau trong bao nhieu giay gan nhat
+DOSE_STABLE_TOLERANCE_G = 1.0   # bien do toi da cho phep trong khoang do
+DOSE_STABLE_MAX_WAIT_SEC = 4.0  # cho toi da tung nay giay roi dung so tot nhat co
 
 # Set True until real robot is connected → weight/pump are simulated
 SIMULATE_ROBOT = False
@@ -62,6 +70,11 @@ _sim_lock   = threading.Lock()
 
 # ── Cached weight from ESP8266 (updated by background poller) ─
 _weight_cache = {"weight": 0.0, "stable": False, "t": 0.0}
+
+# Rolling history of recent (timestamp, weight) samples, used only for the
+# dosing-specific stability check below — independent of ESP's own flag.
+_weight_history = deque(maxlen=30)
+_history_lock = threading.Lock()
 
 # ── Dispense state ────────────────────────────────────────────
 dispense_lock  = threading.Lock()
@@ -294,6 +307,8 @@ def _weight_poll_loop():
                 _weight_cache["weight"] = float(d["weight"])
                 _weight_cache["stable"] = bool(d.get("stable", False))
             _weight_cache["t"] = time.time()
+            with _history_lock:
+                _weight_history.append((_weight_cache["t"], _weight_cache["weight"]))
         except:
             pass
         time.sleep(0.33)
@@ -328,11 +343,40 @@ def _read_weight() -> float | None:
     return _weight_cache["weight"]
 
 
+def _wait_for_dosing_stable(max_wait: float = DOSE_STABLE_MAX_WAIT_SEC) -> tuple[float | None, bool]:
+    """
+    Block until recent weight samples (last DOSE_STABLE_WINDOW_SEC seconds)
+    all stay within DOSE_STABLE_TOLERANCE_G of each other, or max_wait runs
+    out. Returns (weight, confirmed):
+      - weight = None if the cache itself is stale (ESP unreachable)
+      - confirmed = False if max_wait was hit without ever settling — the
+        best available reading is still returned so the caller can decide
+        whether to trust it or treat it as an error.
+    """
+    start = time.time()
+    while time.time() - start < max_wait:
+        if time.time() - _weight_cache.get("t", 0) > 5:
+            return None, False
+
+        now = time.time()
+        with _history_lock:
+            recent = [w for (t, w) in _weight_history if now - t <= DOSE_STABLE_WINDOW_SEC]
+        if len(recent) >= 3 and (max(recent) - min(recent)) <= DOSE_STABLE_TOLERANCE_G:
+            return recent[-1], True
+
+        time.sleep(0.15)
+
+    with _history_lock:
+        last = _weight_history[-1][1] if _weight_history else None
+    return last, False
+
+
 def _dispense_loop(target: int):
     """
     Full dosing sequence (runs in daemon thread):
       1. Initial 1 s pump burst
-      2. Wait SETTLE_TIME for weight to stabilise
+      2. Wait for the weight to genuinely settle (our own stricter check,
+         not the ESP's loose display-oriented "stable" flag)
       3. Read weight; if >= target → done
       4. Else fire 0.2 s correction burst, repeat from 2
       Max MAX_CORRECTIONS correction bursts before giving up.
@@ -365,21 +409,20 @@ def _dispense_loop(target: int):
                 dispense_state["status"] = "settling"
                 dispense_state["attempts"] = attempt + 1
 
-            _dlog(f"Settling {SETTLE_TIME}s... (attempt {attempt+1})")
-            time.sleep(SETTLE_TIME)
-
-            with dispense_lock:
-                dispense_state["status"] = "measuring"
-
-            weight = _read_weight()
+            _dlog(f"Waiting for weight to settle (attempt {attempt+1})...")
+            weight, confirmed = _wait_for_dosing_stable()
             if weight is None:
                 _dlog("ERROR: ESP8266 unreachable (weight cache stale)")
                 with dispense_lock:
                     dispense_state.update({"running": False, "status": "error",
                                            "result": "esp_error"})
                 return
+            if not confirmed:
+                _dlog(f"WARNING: not settled within {DOSE_STABLE_MAX_WAIT_SEC}s, "
+                      f"using best reading anyway")
 
             with dispense_lock:
+                dispense_state["status"] = "measuring"
                 dispense_state["weight"] = weight
             _dlog(f"Weight: {weight:.0f}g / {target}g")
 

@@ -21,7 +21,7 @@ SERVER_PORT = 5000
 VERCEL_SCALE_URL = "https://robot-com-rang-new.vercel.app/api/scale"
 
 # ── Dosing pump config ───────────────────────────────────────
-PUMP_DO_PORT      = 3      # Robot DO port wired to dosing pump (change as needed)
+PUMP_DO_PORT      = 1      # Output1 — DO port wired to dosing pump/nguyen lieu
 PUMP_INITIAL_SEC  = 1.0    # First pump burst duration
 PUMP_CORRECT_SEC  = 0.2    # Correction burst duration
 SETTLE_TIME       = 1.2    # Seconds to wait for dynamic weight to stabilise

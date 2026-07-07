@@ -29,9 +29,15 @@ PUMP_CORRECT_SEC  = 0.2    # Correction burst duration
 MAX_CORRECTIONS   = 8      # Max correction bursts before giving up
 VALID_TARGETS     = {100, 200, 300}
 
-PUMP_INITIAL_SEC_FALLBACK = 1.0   # dung khi ingredient chua duoc calib
+# Chot tam 2026-07-07: do thuc te 1.5s bom ra 67g -> ~44.67 g/s. Dung lam
+# rate mac dinh khi khong chi dinh ingredient cu the (vd tu man hinh order),
+# thay vi PUMP_INITIAL_SEC_FALLBACK tinh (1s co dinh) truoc day.
+DEFAULT_RATE_G_PER_SEC = 67.0 / 1.5   # ~44.67 g/s
+
+PUMP_INITIAL_SEC_FALLBACK = 1.0   # chi dung neu DEFAULT_RATE_G_PER_SEC bi tat (0/None)
 PUMP_INITIAL_SEC_MIN = 0.2   # san duoi, tranh bom qua ngan khong co tac dung
-PUMP_INITIAL_SEC_MAX = 3.0   # tran tren, tranh tinh sai ra thoi gian bom qua dai
+PUMP_INITIAL_SEC_MAX = 6.0   # tran tren — 200g mac dinh o ~44.67g/s can ~4.5s,
+                             # nang tran de khong bi cat ngan phat bom dau
 
 # 4 nguyen lieu dung CHUNG 1 co cau bom (DO1) — khac nhau o cho nguoi dung
 # do tung loai rieng (do vao pheu, calib, doi nguyen lieu khac, calib lai).
@@ -457,17 +463,21 @@ def _run_dosing_core(target: int, ingredient: str | None = None) -> str:
     try:
         _dlog(f"START target={target}g{' [SIM]' if SIMULATE_ROBOT else ''}")
 
-        # Initial pump — scaled to target using the ingredient's measured
-        # g/s rate so the first burst already lands close, instead of
-        # always firing a fixed 1s regardless of target/ingredient.
-        rate = _ingredient_rates.get(ingredient) if ingredient else None
+        # Initial pump — scaled to target using a measured g/s rate so the
+        # first burst already lands close, instead of always firing a
+        # fixed duration regardless of target. Prefers the specific
+        # ingredient's own calibrated rate; falls back to the general
+        # DEFAULT_RATE_G_PER_SEC (e.g. when called from the order/checkout
+        # flow, which doesn't specify a particular ingredient yet).
+        rate = (_ingredient_rates.get(ingredient) if ingredient else None) or DEFAULT_RATE_G_PER_SEC
         if rate and rate > 0:
             initial_sec = target / rate
             initial_sec = max(PUMP_INITIAL_SEC_MIN, min(PUMP_INITIAL_SEC_MAX, initial_sec))
+            source = f"rate-based {ingredient}" if ingredient and _ingredient_rates.get(ingredient) else "rate-based default"
         else:
             initial_sec = PUMP_INITIAL_SEC_FALLBACK
-        _dlog(f"Initial pump: {initial_sec:.2f}s "
-              f"({'rate-based ' + ingredient if rate else 'fallback'})")
+            source = "fallback"
+        _dlog(f"Initial pump: {initial_sec:.2f}s ({source})")
         _robot_pump(initial_sec)
 
         for attempt in range(MAX_CORRECTIONS + 1):

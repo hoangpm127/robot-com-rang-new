@@ -36,6 +36,10 @@ PUMP_INITIAL_SEC_FALLBACK = 1.0   # dung khi chua co PUMP_RATE_G_PER_SEC
 PUMP_INITIAL_SEC_MIN = 0.2   # san duoi, tranh bom qua ngan khong co tac dung
 PUMP_INITIAL_SEC_MAX = 3.0   # tran tren, tranh tinh sai ra thoi gian bom qua dai
 
+# Chay lien tuc (moi phoi truoc khi do) — tu dong tat sau ngan nay giay
+# phong truong hop quen bam Dung, tranh tran/day nguyen lieu.
+PUMP_CONTINUOUS_MAX_SEC = 30.0
+
 # Doing's own stability check — deliberately NOT the ESP's "stable" flag.
 # That flag is tuned loose (STABLE_N=2, RNG=4.5g) for a snappy web display
 # and can flag prematurely mid-pour. Dosing decisions need to be sure the
@@ -783,6 +787,58 @@ def api_calibrate_pump():
     return jsonify({"started": True, "duration_sec": duration})
 
 
+# ── Continuous pump run (priming/moi phoi before a precise 1s test) ───
+_pump_continuous_running = False
+_pump_continuous_started_at = 0.0
+_pump_continuous_lock = threading.Lock()
+
+def _pump_continuous_watchdog():
+    """Safety net: auto-stop if the operator navigates away / forgets to
+    click Stop, instead of leaving the pump running unattended forever."""
+    while True:
+        time.sleep(1.0)
+        with _pump_continuous_lock:
+            running = _pump_continuous_running
+            started = _pump_continuous_started_at
+        if running and (time.time() - started > PUMP_CONTINUOUS_MAX_SEC):
+            log(f"Pump continuous run: safety auto-stop after {PUMP_CONTINUOUS_MAX_SEC:.0f}s")
+            with robot_lock:
+                send_cmd(f"DO({PUMP_DO_PORT},0)", 0.2)
+            with _pump_continuous_lock:
+                _pump_continuous_running = False
+
+@app.route("/api/pump/continuous/start", methods=["POST"])
+def api_pump_continuous_start():
+    global _pump_continuous_running, _pump_continuous_started_at
+    with _pump_continuous_lock:
+        if _pump_continuous_running:
+            return jsonify({"error": "Already running"}), 409
+        _pump_continuous_running = True
+        _pump_continuous_started_at = time.time()
+    with robot_lock:
+        send_cmd("ClearError()", 0.5)
+        send_cmd("EnableRobot()", 2.0)
+        send_cmd(f"DO({PUMP_DO_PORT},1)", 0.2)
+    log("Pump continuous run: started")
+    return jsonify({"ok": True, "running": True, "max_sec": PUMP_CONTINUOUS_MAX_SEC})
+
+@app.route("/api/pump/continuous/stop", methods=["POST"])
+def api_pump_continuous_stop():
+    global _pump_continuous_running
+    with robot_lock:
+        send_cmd(f"DO({PUMP_DO_PORT},0)", 0.2)
+    with _pump_continuous_lock:
+        _pump_continuous_running = False
+    log("Pump continuous run: stopped")
+    return jsonify({"ok": True, "running": False})
+
+@app.route("/api/pump/continuous/status")
+def api_pump_continuous_status():
+    with _pump_continuous_lock:
+        elapsed = time.time() - _pump_continuous_started_at if _pump_continuous_running else 0
+        return jsonify({"running": _pump_continuous_running, "elapsed_sec": round(elapsed, 1)})
+
+
 @app.route("/api/dispense", methods=["POST"])
 def api_dispense():
     with dispense_lock:
@@ -900,6 +956,9 @@ if __name__ == "__main__":
     # Start weight cache poller
     threading.Thread(target=_weight_poll_loop, daemon=True).start()
     print("Weight poller started")
+
+    # Safety watchdog for the continuous pump run (calibration page)
+    threading.Thread(target=_pump_continuous_watchdog, daemon=True).start()
 
     if SIMULATE_ROBOT:
         print("=" * 50)

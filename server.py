@@ -795,6 +795,7 @@ _pump_continuous_lock = threading.Lock()
 def _pump_continuous_watchdog():
     """Safety net: auto-stop if the operator navigates away / forgets to
     click Stop, instead of leaving the pump running unattended forever."""
+    global _pump_continuous_running
     while True:
         time.sleep(1.0)
         with _pump_continuous_lock:

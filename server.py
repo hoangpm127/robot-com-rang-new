@@ -11,6 +11,8 @@ from collections import deque
 import requests as req
 from flask import Flask, jsonify, request, render_template_string
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
 # ── Robot connection ─────────────────────────────────────────
 ROBOT_IP   = "192.168.5.1"
 SERVER_PORT = 5000
@@ -27,14 +29,34 @@ PUMP_CORRECT_SEC  = 0.2    # Correction burst duration
 MAX_CORRECTIONS   = 8      # Max correction bursts before giving up
 VALID_TARGETS     = {100, 200, 300}
 
-# Measured via /api/calibrate_pump: tare on /scale, fire the pump for
-# exactly 1s, read the resulting weight -> that's grams/second. Fill in
-# the real number here once measured; None falls back to a fixed 1.0s
-# initial burst regardless of target (the old behavior).
-PUMP_RATE_G_PER_SEC = None   # vd: 85.0 neu do duoc 85g sau 1s
-PUMP_INITIAL_SEC_FALLBACK = 1.0   # dung khi chua co PUMP_RATE_G_PER_SEC
+PUMP_INITIAL_SEC_FALLBACK = 1.0   # dung khi ingredient chua duoc calib
 PUMP_INITIAL_SEC_MIN = 0.2   # san duoi, tranh bom qua ngan khong co tac dung
 PUMP_INITIAL_SEC_MAX = 3.0   # tran tren, tranh tinh sai ra thoi gian bom qua dai
+
+# 4 nguyen lieu dung CHUNG 1 co cau bom (DO1) — khac nhau o cho nguoi dung
+# do tung loai rieng (do vao pheu, calib, doi nguyen lieu khac, calib lai).
+# Vi vay khong can DO port rieng, chi can luu toc do (g/s) rieng cho tung ten.
+INGREDIENTS = ["rau", "ngo", "com", "carot"]
+INGREDIENT_LABELS = {"rau": "Rau", "ngo": "Ngô", "com": "Cơm", "carot": "Cà rốt"}
+
+_RATES_FILE = os.path.join(_HERE, "ingredient_rates.json")
+
+def _load_ingredient_rates() -> dict:
+    try:
+        with open(_RATES_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        saved = {}
+    return {name: saved.get(name) for name in INGREDIENTS}
+
+def _save_ingredient_rates(rates: dict):
+    with open(_RATES_FILE, "w", encoding="utf-8") as f:
+        json.dump(rates, f, indent=2, ensure_ascii=False)
+
+# In-memory cache, persisted to _RATES_FILE on every update so a restart
+# doesn't lose calibration (unlike the old single PUMP_RATE_G_PER_SEC
+# constant, which needed a manual code edit for just one ingredient).
+_ingredient_rates = _load_ingredient_rates()
 
 # Chay lien tuc (moi phoi truoc khi do) — tu dong tat sau ngan nay giay
 # phong truong hop quen bam Dung, tranh tran/day nguyen lieu.
@@ -59,7 +81,6 @@ SIMULATE_ROBOT = False
 # Cartesian pose per point, loaded from code_robot/point.json (the project
 # exported from DobotStudio Pro — same points src0.lua's MovJ/MovL refer to
 # by name). {"P1": (x,y,z,rx,ry,rz), ...}
-_HERE = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(_HERE, "code_robot", "point.json"), encoding="utf-8") as _f:
     POINTS = {p["name"]: tuple(p["pose"]) for p in json.load(_f)}
 
@@ -400,17 +421,20 @@ def _wait_for_dosing_stable(max_wait: float = DOSE_STABLE_MAX_WAIT_SEC) -> tuple
     return last, False
 
 
-def _run_dosing_core(target: int) -> str:
+def _run_dosing_core(target: int, ingredient: str | None = None) -> str:
     """
     Full dosing sequence, synchronous — safe to call directly from within
     an already-running thread (e.g. run_cooking_cycle), not just via the
     standalone /api/dispense endpoint's own thread:
-      1. Initial 1 s pump burst
+      1. Initial pump burst (scaled to target using ingredient's measured
+         g/s rate if calibrated, else a fixed fallback duration)
       2. Wait for the weight to genuinely settle (our own stricter check,
          not the ESP's loose display-oriented "stable" flag)
       3. Read weight; if >= target → done
       4. Else fire 0.2 s correction burst, repeat from 2
       Max MAX_CORRECTIONS correction bursts before giving up.
+    ingredient: one of INGREDIENTS, or None to just use the fallback
+    duration regardless of any calibrated rate.
     Returns: "ok" | "underweight" | "esp_error" | "<exception message>"
     """
     global _sim_weight
@@ -433,16 +457,17 @@ def _run_dosing_core(target: int) -> str:
     try:
         _dlog(f"START target={target}g{' [SIM]' if SIMULATE_ROBOT else ''}")
 
-        # Initial pump — scaled to target using the measured g/s rate so
-        # the first burst already lands close, instead of always firing a
-        # fixed 1s regardless of whether target is 100g or 300g.
-        if PUMP_RATE_G_PER_SEC and PUMP_RATE_G_PER_SEC > 0:
-            initial_sec = target / PUMP_RATE_G_PER_SEC
+        # Initial pump — scaled to target using the ingredient's measured
+        # g/s rate so the first burst already lands close, instead of
+        # always firing a fixed 1s regardless of target/ingredient.
+        rate = _ingredient_rates.get(ingredient) if ingredient else None
+        if rate and rate > 0:
+            initial_sec = target / rate
             initial_sec = max(PUMP_INITIAL_SEC_MIN, min(PUMP_INITIAL_SEC_MAX, initial_sec))
         else:
             initial_sec = PUMP_INITIAL_SEC_FALLBACK
         _dlog(f"Initial pump: {initial_sec:.2f}s "
-              f"({'rate-based' if PUMP_RATE_G_PER_SEC else 'fallback'})")
+              f"({'rate-based ' + ingredient if rate else 'fallback'})")
         _robot_pump(initial_sec)
 
         for attempt in range(MAX_CORRECTIONS + 1):
@@ -764,15 +789,28 @@ def api_weight():
         "stale":   age > 5,
     })
 
+@app.route("/api/ingredients")
+def api_ingredients():
+    """List the 4 ingredients (all share the same physical pump/DO1 —
+    calibrated separately because you load one at a time into the hopper)
+    with their currently saved g/s rate, if measured."""
+    return jsonify({
+        "ingredients": [
+            {"id": name, "label": INGREDIENT_LABELS[name], "rate_g_per_sec": _ingredient_rates.get(name)}
+            for name in INGREDIENTS
+        ]
+    })
+
+
 @app.route("/api/calibrate_pump", methods=["POST"])
 def api_calibrate_pump():
     """
     Fires the pump for an exact duration so you can measure g/s rate:
-    1. Empty the cup, TARE on /scale (weight -> 0)
-    2. POST here with duration_sec (default 1.0)
-    3. Read the resulting weight on /scale -> that's grams/second
-    4. Put that number into PUMP_RATE_G_PER_SEC at the top of this file
-       and restart server.py
+    1. Load the ingredient into the hopper, empty the cup, TARE on /scale
+    2. POST here with duration_sec (default 1.0) — `ingredient` is just
+       for the log line, every ingredient fires the same DO1
+    3. Read the resulting weight on /scale
+    4. POST it to /api/ingredients/<name>/rate to save it (see /calibrate page)
     """
     with dispense_lock:
         if dispense_state["running"]:
@@ -780,6 +818,7 @@ def api_calibrate_pump():
 
     data = request.get_json(silent=True) or {}
     duration = float(data.get("duration_sec", 1.0))
+    ingredient = data.get("ingredient")
     if not (0 < duration <= 10):
         return jsonify({"error": "duration_sec must be between 0 and 10"}), 400
 
@@ -788,8 +827,41 @@ def api_calibrate_pump():
             _ensure_enabled()
             _robot_pump(duration)
 
+    log(f"Calibrate pump: {duration}s" + (f" for {ingredient}" if ingredient else ""))
     threading.Thread(target=_run, daemon=True).start()
-    return jsonify({"started": True, "duration_sec": duration})
+    return jsonify({"started": True, "duration_sec": duration, "ingredient": ingredient})
+
+
+@app.route("/api/ingredients/<name>/rate", methods=["POST"])
+def api_set_ingredient_rate(name):
+    """
+    Save a measured rate for one ingredient. Body either:
+      { "rate_g_per_sec": 85.3 }                        - direct value, or
+      { "measured_weight_g": 85.3, "duration_sec": 1.0 } - computed here
+    Persists to ingredient_rates.json so it survives a server restart.
+    """
+    if name not in INGREDIENTS:
+        return jsonify({"error": f"Unknown ingredient {name}"}), 404
+
+    data = request.get_json(silent=True) or {}
+    if "rate_g_per_sec" in data:
+        rate = float(data["rate_g_per_sec"])
+    elif "measured_weight_g" in data:
+        weight = float(data["measured_weight_g"])
+        duration = float(data.get("duration_sec", 1.0))
+        if duration <= 0:
+            return jsonify({"error": "duration_sec must be > 0"}), 400
+        rate = weight / duration
+    else:
+        return jsonify({"error": "Provide rate_g_per_sec or measured_weight_g"}), 400
+
+    if rate <= 0:
+        return jsonify({"error": "Rate must be positive"}), 400
+
+    _ingredient_rates[name] = round(rate, 2)
+    _save_ingredient_rates(_ingredient_rates)
+    log(f"Ingredient rate saved: {name} = {rate:.2f} g/s")
+    return jsonify({"ok": True, "ingredient": name, "rate_g_per_sec": _ingredient_rates[name]})
 
 
 # ── Continuous pump run (priming/moi phoi before a precise 1s test) ───

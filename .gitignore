@@ -23,3 +23,6 @@ Thumbs.db
 
 # ngrok
 *.ngrok*
+
+# Runtime calibration data (machine-specific, not source)
+ingredient_rates.json

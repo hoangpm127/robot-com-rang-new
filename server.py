@@ -224,6 +224,16 @@ def refresh_state():
     except:
         pass
 
+def _ensure_enabled():
+    """ClearError+EnableRobot take ~2.5s combined — skip that fixed delay
+    when the robot is already in a ready state (5=ENABLE, 7=RUNNING),
+    instead of paying it on every single button press/web action."""
+    r = send_cmd("RobotMode()", 0.2)
+    if "{5}" in r or "{7}" in r:
+        return
+    send_cmd("ClearError()", 0.5)
+    send_cmd("EnableRobot()", 2.5)
+
 # ── MovJ/MovL by named point (dashboard command, not ServoJ streaming) ─
 # Translated from code_robot/src0.lua — that project uses MovJ/MovL to
 # named points, which need the robot's own path planner (important for
@@ -287,9 +297,7 @@ def run_program():
     with robot_lock:
         state["busy"] = True
         try:
-            log("ClearError + Enable")
-            send_cmd("ClearError()", 0.5)
-            send_cmd("EnableRobot()", 2.5)
+            _ensure_enabled()
             send_cmd("SpeedFactor(30)", 0.3)
 
             log(f"Dosing to {DEFAULT_TARGET_WEIGHT}g...")
@@ -502,8 +510,7 @@ def run_cooking_cycle(target_weight: int = DEFAULT_TARGET_WEIGHT):
     with robot_lock:
         state["busy"] = True
         try:
-            send_cmd("ClearError()", 0.5)
-            send_cmd("EnableRobot()", 2.5)
+            _ensure_enabled()
             send_cmd("SpeedFactor(30)", 0.3)
 
             _cook_log(f"Dosing to {target_weight}g...")
@@ -704,8 +711,7 @@ def api_move():
         with robot_lock:
             state["busy"] = True
             try:
-                send_cmd("ClearError()", 0.3)
-                send_cmd("EnableRobot()", 2.0)
+                _ensure_enabled()
                 send_cmd("SpeedFactor(30)", 0.3)
                 log(f"Moving to {point}")
                 _move("MovJ", point)
@@ -779,8 +785,7 @@ def api_calibrate_pump():
 
     def _run():
         with robot_lock:
-            send_cmd("ClearError()", 0.5)
-            send_cmd("EnableRobot()", 2.0)
+            _ensure_enabled()
             _robot_pump(duration)
 
     threading.Thread(target=_run, daemon=True).start()
@@ -817,8 +822,7 @@ def api_pump_continuous_start():
         _pump_continuous_running = True
         _pump_continuous_started_at = time.time()
     with robot_lock:
-        send_cmd("ClearError()", 0.5)
-        send_cmd("EnableRobot()", 2.0)
+        _ensure_enabled()
         send_cmd(f"DO({PUMP_DO_PORT},1)", 0.2)
     log("Pump continuous run: started")
     return jsonify({"ok": True, "running": True, "max_sec": PUMP_CONTINUOUS_MAX_SEC})

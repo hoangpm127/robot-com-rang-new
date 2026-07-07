@@ -298,6 +298,8 @@ def _do_pin(index: int, value: int):
 def run_motion_sequence():
     """Scoop/pour/place cycle from code_robot/src0.lua. Assumes the
     ingredient has already been dosed (DO1 handled separately by dosing)."""
+    _do_pin(2, 0)   # dieu kien ban dau: dam bao kep dang mo, khong gia dinh
+                    # trang thai con sot lai tu lan chay truoc (loi/mat dien giua chung)
     _move("MovJ", "P3")
     _move("MovL", "P4")
     _do_pin(2, 1)   # grip ON

@@ -74,8 +74,10 @@ DOSE_STABLE_MAX_WAIT_SEC = 4.0  # cho toi da tung nay giay roi dung so tot nhat 
 
 # Weight target used for the automatic cook cycle triggered by checkout —
 # order doesn't currently carry per-item portion detail through to here,
-# so every item doses to this same default ("full" tier of VALID_TARGETS).
-DEFAULT_TARGET_WEIGHT = 200
+# so every item doses to this same default. Matches PUMP_INITIAL_SEC's
+# calibrated output (1.5s -> ~67g) almost exactly, so correction bursts
+# should rarely be needed in practice.
+DEFAULT_TARGET_WEIGHT = 67
 
 # Set True until real robot is connected → weight/pump are simulated
 SIMULATE_ROBOT = False

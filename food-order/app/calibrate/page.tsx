@@ -16,6 +16,10 @@ interface Ingredient {
   rate_g_per_sec: number | null
 }
 
+// Dung chung cho ca lan bam bom LAN luc tinh rate — doi 1 cho o day la du,
+// khong can sua nhieu noi.
+const CALIBRATE_DURATION_SEC = 1.5
+
 export default function CalibratePage() {
   const [data, setData] = useState<ScaleData | null>(null)
   const [ingredients, setIngredients] = useState<Ingredient[]>([])
@@ -65,17 +69,17 @@ export default function CalibratePage() {
 
   const runOneSecond = async () => {
     setBusy1s(true)
-    showToast('Đang bơm 1 giây...', 60000)
+    showToast(`Đang bơm ${CALIBRATE_DURATION_SEC}s...`, 60000)
     try {
       await fetch('/api/robot/calibrate_pump', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ duration_sec: 1.0, ingredient: selected }),
+        body: JSON.stringify({ duration_sec: CALIBRATE_DURATION_SEC, ingredient: selected }),
       })
       setTimeout(() => {
         setBusy1s(false)
         showToast('Xong! Kiểm tra số cân rồi bấm "Lưu tốc độ" bên dưới')
-      }, 1400)
+      }, CALIBRATE_DURATION_SEC * 1000 + 400)
     } catch {
       setBusy1s(false)
       showToast('Lỗi khi gọi robot server (ROBOT_SERVER_URL/ngrok còn sống không?)')
@@ -107,7 +111,7 @@ export default function CalibratePage() {
       const r = await fetch(`/api/robot/ingredients/${selected}/rate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ measured_weight_g: data.weight, duration_sec: 1.0 }),
+        body: JSON.stringify({ measured_weight_g: data.weight, duration_sec: CALIBRATE_DURATION_SEC }),
       })
       const d = await r.json()
       if (d.error) { showToast(d.error); return }
@@ -184,7 +188,7 @@ export default function CalibratePage() {
 
         <button type="button" disabled={busy1s || continuousOn} onClick={runOneSecond}
           className="w-full py-4 rounded-2xl font-bold bg-emerald-600 hover:bg-emerald-500 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
-          {busy1s ? 'Đang bơm...' : `⏱ Bơm ${current?.label ?? ''} đúng 1 giây`}
+          {busy1s ? 'Đang bơm...' : `⏱ Bơm ${current?.label ?? ''} đúng ${CALIBRATE_DURATION_SEC} giây`}
         </button>
 
         <button type="button" onClick={saveRate}
@@ -198,7 +202,7 @@ export default function CalibratePage() {
           <p>2. Để cốc trống lên cân → <b>TARE</b></p>
           <p>3. Bấm <b>Chạy liên tục</b> để mồi phôi cho đều dòng, bấm lại để dừng khi thấy đều</p>
           <p>4. Đổ hết phần vừa mồi đi, <b>TARE</b> lại lần nữa (cân về 0)</p>
-          <p>5. Bấm <b>Bơm đúng 1 giây</b> → đợi số cân ổn định</p>
+          <p>5. Bấm <b>Bơm đúng {CALIBRATE_DURATION_SEC} giây</b> → đợi số cân ổn định</p>
           <p>6. Bấm <b>Lưu tốc độ</b> — hệ thống tự lưu số cân hiện tại làm tốc độ g/s cho nguyên liệu đang chọn (không cần sửa code/restart)</p>
         </div>
       </div>

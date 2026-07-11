@@ -152,24 +152,32 @@ def _dlog(msg):
 # ─────────────────────────────────────────────────────────────
 
 def send_cmd(cmd, wait=0.4):
+    """All socket access to the robot funnels through here, serialized on
+    robot_lock (RLock — safe to call from code that already holds it, e.g.
+    _move()/_robot_pump()). Without this, the keepalive thread's reconnect
+    and a concurrent HTTP request's send_cmd() could race on the same
+    global `sock`, each seeing the other's half-finished reconnect as a
+    fresh failure — observed in practice as "Reconnected OK" immediately
+    followed by "Connection lost" in the same second, looping forever."""
     global sock
-    try:
-        sock.sendall((cmd + "\n").encode())
-        time.sleep(wait)
-        resp = sock.recv(4096).decode().strip()
-        return resp
-    except OSError:
-        state["connected"] = False
-        if _reconnect():
-            try:
-                sock.sendall((cmd + "\n").encode())
-                time.sleep(wait)
-                return sock.recv(4096).decode().strip()
-            except Exception as e2:
-                return f"ERR:{e2}"
-        return "ERR:disconnected"
-    except Exception as e:
-        return f"ERR:{e}"
+    with robot_lock:
+        try:
+            sock.sendall((cmd + "\n").encode())
+            time.sleep(wait)
+            resp = sock.recv(4096).decode().strip()
+            return resp
+        except OSError:
+            state["connected"] = False
+            if _reconnect():
+                try:
+                    sock.sendall((cmd + "\n").encode())
+                    time.sleep(wait)
+                    return sock.recv(4096).decode().strip()
+                except Exception as e2:
+                    return f"ERR:{e2}"
+            return "ERR:disconnected"
+        except Exception as e:
+            return f"ERR:{e}"
 
 def _reconnect():
     global sock
@@ -202,16 +210,27 @@ def _reconnect():
     return False
 
 def _keepalive_loop():
+    """Pings the robot every 8s. Proactively reconnects on failure — and
+    keeps retrying even if already marked disconnected (e.g. robot was
+    switched out of TCP/IP mode and back) — so the connection is already
+    fresh by the time an actual command is sent, instead of only being
+    detected/fixed reactively on the next user action (which can hang
+    for up to ~65s while _reconnect()'s retry loop runs)."""
     while True:
         time.sleep(8)
-        if state["connected"] and not state["busy"]:
-            with robot_lock:
-                try:
-                    sock.sendall(b"RobotMode()\n")
-                    time.sleep(0.2)
-                    sock.recv(1024)
-                except:
-                    pass
+        if state["busy"]:
+            continue
+        with robot_lock:
+            try:
+                sock.sendall(b"RobotMode()\n")
+                time.sleep(0.2)
+                resp = sock.recv(1024)
+                if not resp:
+                    raise OSError("empty response from robot")
+                state["connected"] = True
+            except Exception:
+                state["connected"] = False
+                _reconnect()
 
 def connect_robot():
     global sock
